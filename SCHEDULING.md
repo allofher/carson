@@ -413,6 +413,4 @@ The agent also needs visibility into what's already scheduled to avoid duplicate
 
 ### Open questions
 
-1. **Should recurring events get a fresh `chain` on each recurrence, or continue the same chain?** Recommendation: fresh chain. Each recurrence is logically independent.
-2. **Should the agent be able to modify a pending event (change time, update prompt)?** Recommendation: no. Cancel and re-create. Simpler to implement, easier to audit.
-3. **Should completed bundles be archived or deleted?** Recommendation: archive to `completed/` with a TTL-based cleanup (e.g., 30 days). Useful for debugging and chain tracing.
+See [QUESTIONS.md](QUESTIONS.md) — the scheduling-related questions are tracked there under **Recursive Scheduling**.
