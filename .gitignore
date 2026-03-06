@@ -1,0 +1,41 @@
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build output
+/build/
+/dist/
+/out/
+/target/
+
+# Dependencies (language-specific — extend as stack is chosen)
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs & runtime
+*.log
+*.pid
+*.sock
+
+# Coverage & test artifacts
+/coverage/
+.nyc_output/
+htmlcov/
+
+# Cron lock files generated at runtime
+*.lock
