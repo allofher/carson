@@ -80,6 +80,15 @@ func initBrain() error {
 		return fmt.Errorf("writing config: %w", err)
 	}
 
+	// Create system prompt file if it doesn't exist.
+	promptPath := filepath.Join(configDir, "system-prompt.md")
+	if _, err := os.Stat(promptPath); os.IsNotExist(err) {
+		if err := os.WriteFile(promptPath, []byte(""), 0644); err != nil {
+			return fmt.Errorf("creating system prompt: %w", err)
+		}
+		fmt.Printf("System prompt created at %s\n", promptPath)
+	}
+
 	fmt.Printf("Brain initialized at %s\n", brainPath)
 	fmt.Printf("Config saved to %s\n", configPath)
 	return nil
