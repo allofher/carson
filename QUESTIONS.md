@@ -135,3 +135,105 @@ Unresolved design questions collected from across the project docs. Each entry l
 **Recommendation:** None yet. File locking is the simplest correct solution but may cause the frontend to stall. A CRDT-like approach (each writer appends operations to a log, periodic compaction) is more robust but significantly more complex.
 
 **Status:** Undecided
+
+---
+
+## Frontend Surfaces (`FRONTEND.md`)
+
+### Q14: Desktop app toolkit — native per-platform or cross-platform framework?
+
+> macOS and Linux both need a native app. Options: (a) two separate native apps (SwiftUI + GTK/Qt), (b) a cross-platform framework (Tauri, Electron, Flutter desktop), (c) a web app served locally by the daemon. Each has different trade-offs for performance, look-and-feel, and maintenance burden.
+
+**Recommendation:** None yet. Tauri (Rust + web view) is the leading candidate — small binary, native-feeling, single codebase. But it needs evaluation against the "polished dinner service" design goal, especially on Linux where web views vary.
+
+**Status:** Undecided
+
+---
+
+### Q15: Desktop ↔ daemon communication — file watching, socket, or HTTP?
+
+> The desktop app needs to know about task changes, agent notifications, and brain state. Options: (a) watch the brain folder directly (same as Carson), (b) connect to a Unix socket / named pipe, (c) local HTTP API, (d) a combination. File watching is simple but doesn't cover push notifications from the agent.
+
+**Recommendation:** Hybrid — file watching for brain state (TODO.md, .meta/, summaries) plus a local socket for real-time notifications from `frontend_command`. Keeps the brain folder as the source of truth while enabling push.
+
+**Status:** Undecided
+
+---
+
+### Q16: Terminal chat — standalone binary or subcommand of Carson?
+
+> Should the terminal chat be `carson chat` (subcommand of the main binary) or a separate `carson-chat` binary? Subcommand keeps distribution simple; separate binary allows independent versioning and lighter dependencies.
+
+**Recommendation:** Subcommand (`carson chat`). Simpler to ship, and the chat client is lightweight enough to not bloat the main binary.
+
+**Status:** Undecided
+
+---
+
+### Q17: Terminal chat — session persistence model?
+
+> How should chat history be stored? Options: (a) plain text/markdown log files, (b) SQLite database, (c) JSON lines. Needs to support search, resume, and eventually context replay for the agent.
+
+**Recommendation:** None yet. JSON lines is the simplest and grep-friendly. SQLite is more robust for search. Depends on whether we want full-text search across sessions.
+
+**Status:** Undecided
+
+---
+
+### Q18: Mobile sync — how does the iOS app communicate with a local daemon?
+
+> Carson runs on the user's desktop/server, not in the cloud. The mobile app needs to reach it. Options: (a) Tailscale/WireGuard tunnel to the local machine, (b) a lightweight relay service (cloud-hosted, just passes messages), (c) iCloud or shared file sync (Syncthing, etc.), (d) the user exposes Carson on their LAN and the phone connects over WiFi only.
+
+**Recommendation:** None yet. This is the hardest infrastructure question. A relay service is the most reliable UX but introduces a cloud dependency. Tailscale is elegant but requires setup. LAN-only limits mobile usefulness to home/office.
+
+**Status:** Undecided
+
+---
+
+### Q19: Mobile voice drop — on-device or server-side transcription?
+
+> Voice drops need transcription. Options: (a) on-device (Apple Speech framework — free, private, works offline), (b) server-side via Carson (Whisper or API — higher quality, costs money/compute), (c) hybrid (on-device first, server refines).
+
+**Recommendation:** On-device first (Apple Speech). It's free, private, and instant. The transcript is what gets sent to Carson — audio never leaves the phone unless the user opts in.
+
+**Status:** Undecided
+
+---
+
+### Q20: Mobile context cards — who generates them?
+
+> Cards need calendar data + brain context + relevance ranking. Options: (a) Carson generates cards proactively via scheduled events and syncs them to mobile, (b) the mobile app pulls raw data and assembles cards locally, (c) the mobile app requests cards on-demand from Carson.
+
+**Recommendation:** Carson generates them. The agent already has calendar access (SCHEDULING.md) and brain context. It can pre-compute cards via scheduled events (e.g., "15 minutes before each meeting, generate a context card") and sync the result. Keeps the mobile app thin.
+
+**Status:** Undecided
+
+---
+
+### Q21: Should the desktop app have *any* chat capability?
+
+> The current proposal gives chat exclusively to the terminal. But some users may want a lightweight inline prompt in the desktop app — e.g., "summarize this file" while browsing the brain. Is that scope creep, or a natural extension?
+
+**Recommendation:** None yet. Risk of the desktop app becoming a second chat client. A compromise: allow single-turn "ask about this" prompts contextual to what the user is looking at, but no persistent conversation.
+
+**Status:** Undecided
+
+---
+
+### Q22: Notification protocol — what can the agent send to the desktop app?
+
+> The `frontend_command` tool needs a defined schema. What notification types are supported? Just text alerts? Actionable notifications (with buttons)? Deep links into the brain browser? Rich content (markdown, images)?
+
+**Recommendation:** None yet. Start minimal: text message + optional action (a single deep link into the brain browser). Expand based on real usage patterns.
+
+**Status:** Undecided
+
+---
+
+### Q23: Should the mobile app work fully offline?
+
+> If the sync layer is unavailable (no network, Carson daemon is off), should the mobile app still show cached context cards and allow task completion (queued for sync later)? Or should it degrade to "no connection" state?
+
+**Recommendation:** Offline-capable with queued writes. Context cards are pre-generated and cacheable. Task completions are simple state changes that can be queued and synced later. Voice drops can be stored locally and sent when connectivity returns.
+
+**Status:** Undecided
