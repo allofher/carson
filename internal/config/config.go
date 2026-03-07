@@ -1,12 +1,42 @@
 package config
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
+
+//go:embed config.default.json
+var defaultConfigJSON []byte
+
+// DefaultInitConfig returns the default config.json content for `carson init`,
+// with brain_path set to the given absolute path. All other fields come from
+// the embedded config.default.json — the single source of truth.
+func DefaultInitConfig(brainPath string) ([]byte, error) {
+	var m map[string]any
+	if err := json.Unmarshal(defaultConfigJSON, &m); err != nil {
+		return nil, fmt.Errorf("parsing default config: %w", err)
+	}
+
+	m["brain_path"] = brainPath
+
+	// Resolve ~ paths to absolute for the user's machine.
+	for _, key := range []string{"log_dir", "system_prompt_path"} {
+		if v, ok := m[key].(string); ok {
+			m[key] = expandHome(v)
+		}
+	}
+
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
 
 // UserConfigDir is the directory for user-level configuration.
 // Defaults to ~/.config/carson but can be overridden for testing.
@@ -18,6 +48,14 @@ type Config struct {
 
 	// LogLevel controls logging verbosity: debug, info, warn, error.
 	LogLevel string
+
+	// DaemonPort is the HTTP port the daemon API listens on.
+	// Defaults to 7780.
+	DaemonPort int
+
+	// LogDir is the directory for log files.
+	// Defaults to ~/.config/carson/logs.
+	LogDir string
 
 	// LLMProvider is the upstream LLM provider name: anthropic, openai, gemini, ollama.
 	LLMProvider string
@@ -41,10 +79,12 @@ type Config struct {
 // userConfig is the on-disk representation of ~/.config/carson/config.json.
 // This holds preferences — never secrets.
 type userConfig struct {
-	BrainPath   string `json:"brain_path"`
-	LogLevel    string `json:"log_level,omitempty"`
-	LLMProvider string `json:"llm_provider,omitempty"`
-	LLMModel    string `json:"llm_model,omitempty"`
+	BrainPath        string `json:"brain_path"`
+	LogLevel         string `json:"log_level,omitempty"`
+	DaemonPort       int    `json:"daemon_port,omitempty"`
+	LogDir           string `json:"log_dir,omitempty"`
+	LLMProvider      string `json:"llm_provider,omitempty"`
+	LLMModel         string `json:"llm_model,omitempty"`
 	LLMBaseURL       string `json:"llm_base_url,omitempty"`
 	SystemPromptPath string `json:"system_prompt_path,omitempty"`
 }
@@ -66,11 +106,15 @@ var providerKeyEnvVars = map[string]string{
 // The API key is resolved based on the active provider.
 func Load(envDir string) (*Config, error) {
 	uc := loadUserConfig()
+	// Load .env from config dir first (stable location), then CWD (dev override).
+	loadDotEnv(filepath.Join(UserConfigDir, ".env"))
 	loadDotEnv(filepath.Join(envDir, ".env"))
 
 	cfg := &Config{
 		BrainDir:    firstNonEmpty(os.Getenv("CARSON_BRAIN_DIR"), uc.BrainPath),
 		LogLevel:    firstNonEmpty(os.Getenv("CARSON_LOG_LEVEL"), uc.LogLevel, "info"),
+		DaemonPort:  firstNonZeroInt(parseIntEnv("CARSON_DAEMON_PORT"), uc.DaemonPort, 7780),
+		LogDir:      expandHome(firstNonEmpty(os.Getenv("CARSON_LOG_DIR"), uc.LogDir, filepath.Join(UserConfigDir, "logs"))),
 		LLMProvider: firstNonEmpty(os.Getenv("CARSON_LLM_PROVIDER"), uc.LLMProvider),
 		LLMModel:    firstNonEmpty(os.Getenv("CARSON_LLM_MODEL"), uc.LLMModel),
 		LLMBaseURL:  firstNonEmpty(os.Getenv("CARSON_LLM_BASE_URL"), uc.LLMBaseURL),
@@ -150,11 +194,29 @@ func firstNonEmpty(vals ...string) string {
 }
 
 func defaultConfigDir() string {
-	if dir, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(dir, "carson")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", ".config", "carson")
 	}
-	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "carson")
+}
+
+func parseIntEnv(key string) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0
+	}
+	n, _ := strconv.Atoi(v)
+	return n
+}
+
+func firstNonZeroInt(vals ...int) int {
+	for _, v := range vals {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 // loadDotEnv reads a .env file and sets any variables not already present

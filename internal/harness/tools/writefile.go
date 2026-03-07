@@ -53,6 +53,13 @@ func WriteFile(brainDir string) harness.ToolDef {
 				return "", err
 			}
 
+			// Validate topofmind.md constraints.
+			if brain.IsTopOfMindPath(in.Path) {
+				if err := brain.ValidateTopOfMind(in.Content); err != nil {
+					return "", fmt.Errorf("write rejected: %w", err)
+				}
+			}
+
 			// Create parent directories.
 			dir := filepath.Dir(absPath)
 			if err := os.MkdirAll(dir, 0755); err != nil {

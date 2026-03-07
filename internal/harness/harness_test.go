@@ -75,8 +75,9 @@ func TestHarness_ToolCallLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result != "The tool said: HELLO" {
-		t.Errorf("result = %q, want %q", result, "The tool said: HELLO")
+	// RunStream emits all text events, so Run concatenates them all.
+	if result != "Let me check.The tool said: HELLO" {
+		t.Errorf("result = %q, want %q", result, "Let me check.The tool said: HELLO")
 	}
 	if mock.calls != 2 {
 		t.Errorf("expected 2 LLM calls, got %d", mock.calls)

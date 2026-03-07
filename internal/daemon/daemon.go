@@ -4,22 +4,30 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/allofher/carson/internal/api"
 	"github.com/allofher/carson/internal/brain"
 	"github.com/allofher/carson/internal/config"
 	"github.com/allofher/carson/internal/harness"
 	"github.com/allofher/carson/internal/harness/tools"
 	"github.com/allofher/carson/internal/llm"
+	"github.com/allofher/carson/internal/logging"
 )
 
 // Run starts the Carson daemon. It initializes the brain folder, LLM
-// provider, and tool harness, then blocks until a termination signal
-// is received.
+// provider, tool harness, and API server, then blocks until a termination
+// signal is received.
 func Run(cfg *config.Config) error {
-	logger := newLogger(cfg.LogLevel)
+	level := logging.ParseLevel(cfg.LogLevel)
+	logger, broadcaster, err := logging.Setup(cfg.LogDir, level)
+	if err != nil {
+		return fmt.Errorf("initializing logging: %w", err)
+	}
 
 	logger.Info("starting carson", "brain_dir", cfg.BrainDir)
 
@@ -32,6 +40,7 @@ func Run(cfg *config.Config) error {
 	systemPrompt := loadSystemPrompt(cfg.SystemPromptPath, logger)
 
 	// Initialize LLM provider and harness if configured.
+	var h *harness.Harness
 	if cfg.LLMProvider != "" {
 		provider, err := llm.New(cfg)
 		if err != nil {
@@ -39,30 +48,50 @@ func Run(cfg *config.Config) error {
 		}
 		logger.Info("LLM provider ready", "provider", cfg.LLMProvider, "model", cfg.LLMModel)
 
-		// Build tool registry.
 		registry := harness.NewRegistry()
 		registry.Register(tools.ReadFile(cfg.BrainDir))
 		registry.Register(tools.WriteFile(cfg.BrainDir))
 		registry.Register(tools.Bash(cfg.BrainDir))
 
-		h := harness.New(harness.Config{
+		h = harness.New(harness.Config{
 			Provider:     provider,
 			Registry:     registry,
 			SystemPrompt: systemPrompt,
+			BrainDir:     cfg.BrainDir,
 			Logger:       logger,
 		})
-		_ = h // ready for use by event router / chat
 	} else {
 		logger.Warn("no LLM provider configured — running without agent capabilities")
 	}
+
+	// Start the API server.
+	handlers := &api.Handlers{
+		Config:      cfg,
+		Harness:     h,
+		Broadcaster: broadcaster,
+		Logger:      logger,
+		StartTime:   time.Now(),
+	}
+	srv := api.NewServer(cfg.DaemonPort, handlers)
+
+	go func() {
+		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
+			logger.Error("API server error", "error", err)
+		}
+	}()
 
 	// Block until we receive SIGINT or SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	logger.Info("carson is running", "pid", os.Getpid())
+	logger.Info("carson is running", "pid", os.Getpid(), "port", cfg.DaemonPort)
 	<-ctx.Done()
 	logger.Info("shutting down")
+
+	// Graceful shutdown of the API server.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv.Shutdown(shutdownCtx)
 
 	return nil
 }
@@ -83,19 +112,4 @@ func loadSystemPrompt(path string, logger *slog.Logger) string {
 		logger.Info("system prompt loaded", "path", path, "bytes", len(prompt))
 	}
 	return prompt
-}
-
-func newLogger(level string) *slog.Logger {
-	var l slog.Level
-	switch level {
-	case "debug":
-		l = slog.LevelDebug
-	case "warn":
-		l = slog.LevelWarn
-	case "error":
-		l = slog.LevelError
-	default:
-		l = slog.LevelInfo
-	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l}))
 }

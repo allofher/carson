@@ -24,6 +24,15 @@ func Init(brainDir string) error {
 			return fmt.Errorf("creating %s: %w", dir, err)
 		}
 	}
+
+	// Create topofmind.md if it doesn't exist.
+	tomPath := filepath.Join(brainDir, TopOfMindFile)
+	if _, err := os.Stat(tomPath); os.IsNotExist(err) {
+		if err := os.WriteFile(tomPath, []byte(""), 0644); err != nil {
+			return fmt.Errorf("creating %s: %w", TopOfMindFile, err)
+		}
+	}
+
 	return nil
 }
 

@@ -1,14 +1,15 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/allofher/carson/internal/brain"
+	"github.com/allofher/carson/internal/chat"
 	"github.com/allofher/carson/internal/config"
 	"github.com/allofher/carson/internal/daemon"
+	"github.com/allofher/carson/internal/lookout"
 )
 
 func main() {
@@ -25,6 +26,16 @@ func main() {
 		}
 	case "start":
 		if err := start(); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+	case "chat":
+		if err := runChat(); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+	case "lookout":
+		if err := runLookout(); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
@@ -71,12 +82,11 @@ func initBrain() error {
 	}
 
 	configPath := filepath.Join(configDir, "config.json")
-	cfg := map[string]string{"brain_path": brainPath}
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := config.DefaultInitConfig(brainPath)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(configPath, append(data, '\n'), 0644); err != nil {
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 
@@ -89,21 +99,56 @@ func initBrain() error {
 		fmt.Printf("System prompt created at %s\n", promptPath)
 	}
 
+	// Create .env file if it doesn't exist.
+	envPath := filepath.Join(configDir, ".env")
+	if _, err := os.Stat(envPath); os.IsNotExist(err) {
+		envContent := `# Carson API keys — add your provider key here.
+# CARSON_ANTHROPIC_API_KEY=
+# CARSON_OPENAI_API_KEY=
+# CARSON_GEMINI_API_KEY=
+`
+		if err := os.WriteFile(envPath, []byte(envContent), 0600); err != nil {
+			return fmt.Errorf("creating .env: %w", err)
+		}
+		fmt.Printf("Env file created at %s (add your API key here)\n", envPath)
+	}
+
 	fmt.Printf("Brain initialized at %s\n", brainPath)
 	fmt.Printf("Config saved to %s\n", configPath)
 	return nil
 }
 
 func start() error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	cfg, err := config.Load(cwd)
+	cfg, err := config.Load(mustCwd())
 	if err != nil {
 		return err
 	}
 	return daemon.Run(cfg)
+}
+
+func runChat() error {
+	cfg, err := config.Load(mustCwd())
+	if err != nil {
+		return err
+	}
+	return chat.Run(cfg.DaemonPort, config.UserConfigDir)
+}
+
+func runLookout() error {
+	cfg, err := config.Load(mustCwd())
+	if err != nil {
+		return err
+	}
+	return lookout.Run(cfg.LogDir, cfg.DaemonPort, 50)
+}
+
+func mustCwd() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	return cwd
 }
 
 func usage() {
@@ -112,6 +157,8 @@ func usage() {
 Commands:
   init <path>  Set a directory as your brain folder
   start        Start the Carson daemon in the foreground
+  chat         Open the terminal chat (The Study)
+  lookout      Stream daemon logs with colored output
   version      Print version information
   help         Show this help message
 `)
