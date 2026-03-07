@@ -1,130 +1,99 @@
 # Brain — Watch Folder Design Proposal
 
 > **Audience:** Developer picking this up for implementation.
-> **Status:** Proposal / RFC — not yet implemented.
+> **Status:** Decisions finalized — not yet implemented.
 
 ## The Idea
 
-The watched folder is the agent's "brain" — a shared filesystem space where the human stores their artifacts and the agent organizes, annotates, links, and builds on top of them. Two rules govern everything:
+The watched folder is the agent's "brain" — a shared filesystem space where the human stores their artifacts and the agent organizes, annotates, links, and builds on top of them. One rule governs everything:
 
-1. **Human artifacts are sacred.** The agent never deletes, overwrites, or degrades a file the human created. It can only *add* to them (metadata, annotations, links).
-2. **Agent artifacts are ephemeral.** The agent can freely create, edit, and delete its own files. Stale agent-generated content is the agent's responsibility to clean up.
+**The `static/` directory is read-only for the agent.** The user places files there when they want to guarantee the agent can never modify, delete, or move them. Everything outside `static/` is fair game — the agent can read, write, edit, and delete freely.
 
-## Ownership Model
+There is no per-file ownership tracking, no manifest, no ownership tags. The permission boundary is a single directory check: is the target path under `static/`? If yes, block writes. If no, allow them.
 
-Every file in the brain has an **owner**: `human` or `agent`. Ownership is determined at creation time and never changes.
+## Permission Model
 
 ```mermaid
-flowchart LR
-    subgraph Human Owned
-        H1[photo.jpg]
-        H2[meeting-notes.md]
-        H3[recipe.pdf]
-    end
+flowchart TD
+    A[Agent wants to act on a file] --> B{"Is it under static/?"}
 
-    subgraph Agent Owned
-        A1[".meta/photo.jpg.meta.json"]
-        A2[links.md]
-        A3[daily-summary/2026-03-06.md]
-        A4[TODO.md]
-    end
+    B -->|Yes| C{What operation?}
+    C -->|Read| D[✅ Always allowed]
+    C -->|Write / Edit| E[❌ Blocked by harness]
+    C -->|Delete| F[❌ Blocked by harness]
+    C -->|Rename / move| G[❌ Blocked by harness]
 
-    H1 -. "agent adds metadata" .-> A1
-    H2 -. "agent extracts action items" .-> A4
-    A4 -. "agent links back" .-> H2
+    B -->|No| H{What operation?}
+    H -->|Read| I[✅ Always allowed]
+    H -->|Write / Edit| J[✅ Allowed]
+    H -->|Delete| K[✅ Allowed]
+    H -->|Rename / move| L[✅ Allowed]
+
+    style E fill:#f8d7da,stroke:#dc3545
+    style F fill:#f8d7da,stroke:#dc3545
+    style G fill:#f8d7da,stroke:#dc3545
+    style D fill:#d4edda,stroke:#28a745
+    style I fill:#d4edda,stroke:#28a745
+    style J fill:#d4edda,stroke:#28a745
+    style K fill:#d4edda,stroke:#28a745
+    style L fill:#d4edda,stroke:#28a745
 ```
 
-### How ownership is tracked
-
-The agent needs a reliable way to know what it created vs. what the human added. Options (see QUESTIONS.md Q4):
-
-- **Convention:** Agent files always live under specific agent-owned directories (e.g., `.meta/`, `daily-summary/`), or carry a marker in their frontmatter/metadata.
-- **Manifest:** An agent-maintained index file (e.g., `.brain/manifest.json`) that lists every agent-created path.
-- **Extended attributes / dotfile sidecars:** A `.ownership` marker per file.
-
-Regardless of mechanism, the watcher must tag new files with their origin on creation and the harness must enforce the ownership rules before any write/delete tool call executes.
+The user decides what's protected. If they want a meeting transcript to be immutable, they put it in `static/meetings/`. If they're fine with the agent editing or enriching a file in-place, they leave it outside `static/`.
 
 ## Folder Structure
 
-Minimal by design. Only a few top-level directories, with the human free to organize their own files however they want.
+Minimal by design. The human is free to organize files however they want.
 
 ```
 brain/                          ← the watched folder root
-├── .brain/                     ← agent internals (hidden, agent-owned)
-│   ├── manifest.json           ← ownership registry
+├── .brain/                     ← agent internals (hidden)
 │   └── index.json              ← search/link index
-├── .meta/                      ← sidecar metadata for human files (agent-owned)
-│   ├── photo.jpg.meta.json
-│   └── meeting-notes.md.meta.json
-├── TODO.md                     ← unified todo file (agent-owned)
-├── daily-summary/              ← agent-generated summaries (agent-owned)
+├── .meta/                      ← sidecar metadata for files
+│   ├── photos/vacation.jpg.meta.json
+│   └── meetings/standup.md.meta.json
+├── TODO.md                     ← unified todo file
+├── daily-summary/              ← agent-generated summaries
 │   ├── 2026-03-05.md
 │   └── 2026-03-06.md
+├── static/                     ← read-only for the agent
+│   ├── photos/
+│   │   └── vacation.jpg
+│   ├── meetings/
+│   │   └── standup.md
+│   └── recipes/
+│       └── recipe.pdf
 │
-│   ── everything else is human territory ──
+│   ── everything outside static/ is mutable ──
 │
-├── photos/                     ← human's own folders
-│   └── photo.jpg
-├── meetings/
-│   └── meeting-notes.md
-└── recipes/
-    └── recipe.pdf
+├── notes/
+│   └── quick-thought.md
+└── drafts/
+    └── blog-post.md
 ```
 
 ### Directory Roles
 
-| Path | Owner | Purpose |
+| Path | Agent Access | Purpose |
 |---|---|---|
-| `.brain/` | Agent | Internal bookkeeping — manifest, indices, caches. Hidden from casual browsing. |
-| `.meta/` | Agent | Sidecar metadata files that annotate human artifacts. One `.meta.json` per human file, mirroring the relative path. |
-| `TODO.md` | Agent | The unified task/action-item file. Acts as a lightweight database for both the agent and the frontend. |
-| `daily-summary/` | Agent | Periodic summaries the agent generates. |
-| Everything else | Human | The human's own files and folders. Agent reads freely but never modifies or deletes. |
-
-## Permitted Operations by Ownership
-
-```mermaid
-flowchart TD
-    A[Agent wants to act on a file] --> B{Who owns it?}
-
-    B -->|Human| C{What operation?}
-    C -->|Read| D[✅ Always allowed]
-    C -->|"Add metadata (sidecar)"| E["✅ Write to .meta/<path>.meta.json"]
-    C -->|"Link / reference"| F[✅ Agent can reference in its own files]
-    C -->|Edit contents| G[❌ Blocked by harness]
-    C -->|Delete| H[❌ Blocked by harness]
-    C -->|Rename / move| I[❌ Blocked by harness]
-
-    B -->|Agent| J{What operation?}
-    J -->|Read| K[✅ Always allowed]
-    J -->|Edit| L[✅ Allowed]
-    J -->|Delete| M[✅ Allowed — agent cleans up its own stale files]
-    J -->|Rename / move| N[✅ Allowed]
-
-    style G fill:#f8d7da,stroke:#dc3545
-    style H fill:#f8d7da,stroke:#dc3545
-    style I fill:#f8d7da,stroke:#dc3545
-    style D fill:#d4edda,stroke:#28a745
-    style E fill:#d4edda,stroke:#28a745
-    style F fill:#d4edda,stroke:#28a745
-    style K fill:#d4edda,stroke:#28a745
-    style L fill:#d4edda,stroke:#28a745
-    style M fill:#d4edda,stroke:#28a745
-    style N fill:#d4edda,stroke:#28a745
-```
+| `.brain/` | Read/Write | Internal bookkeeping — indices, caches. Hidden from casual browsing. |
+| `.meta/` | Read/Write | Sidecar metadata files that annotate brain artifacts. One `.meta.json` per file, mirroring the relative path. |
+| `TODO.md` | Read/Write | The unified task/action-item file. Acts as a lightweight database for both the agent and the frontend. |
+| `daily-summary/` | Read/Write | Periodic summaries the agent generates. |
+| `static/` | **Read-only** | User-protected files. The agent reads freely but all write/edit/delete/move operations are blocked by the harness. |
+| Everything else | Read/Write | Mutable space. The agent can create, edit, and delete files here. |
 
 ## Sidecar Metadata
 
-When the agent wants to enrich a human file — tag a photo, extract keywords from a document, log when it was last referenced — it writes a **sidecar** in `.meta/`.
+When the agent wants to enrich a file — tag a photo, extract keywords from a document, log when it was last referenced — it writes a **sidecar** in `.meta/`.
 
-Example: the human drops `photos/vacation.jpg` into the brain. The agent detects it, analyzes the image, and writes:
+Example: the user has `static/photos/vacation.jpg` in the brain. The agent detects it, analyzes the image, and writes:
 
 ```json
-// .meta/photos/vacation.jpg.meta.json
+// .meta/static/photos/vacation.jpg.meta.json
 {
-  "source_path": "photos/vacation.jpg",
+  "source_path": "static/photos/vacation.jpg",
   "source_hash": "sha256:ab12cd...",
-  "created_by": "agent",
   "created_at": "2026-03-06T14:22:00Z",
   "tags": ["photo", "vacation", "beach", "2025"],
   "description": "Beach sunset photo, likely from July 2025 trip.",
@@ -134,15 +103,19 @@ Example: the human drops `photos/vacation.jpg` into the brain. The agent detects
 }
 ```
 
-The `.meta/` directory mirrors the brain's folder structure so paths stay intuitive and collisions are impossible.
+The `.meta/` directory mirrors the brain's folder structure so paths stay intuitive and collisions are impossible. Note that the agent writes the sidecar to `.meta/` (which is mutable), not to `static/` — the original file is untouched.
+
+The agent decides when to generate sidecars based on context. Rather than eager or lazy generation as a system policy, a repeatable skill or script handles metadata extraction, and the LLM decides when to invoke it based on the current task.
 
 ## The Unified TODO File
 
-`TODO.md` is the most important agent-owned file. It serves three roles simultaneously:
+`TODO.md` is the most important agent-managed file. It serves three roles simultaneously:
 
 1. **Agent context** — The agent reads it on every invocation to understand what's pending, what's been done, and what might need scheduling.
 2. **Frontend database** — The companion frontend reads and renders it as a task board. Structured enough to parse, human-readable enough to edit by hand if needed.
 3. **Scheduling bridge** — Items in the TODO can trigger the agent to call `schedule_event` (from SCHEDULING.md) to set up deferred actions.
+
+> **Scaling plan:** V1 uses a single monolithic `TODO.md`. V2 will break items into individual files with metadata, linked by an overview file or backed by a database.
 
 ### Format
 
@@ -169,6 +142,7 @@ The `.meta/` directory mirrors the brain's folder structure so paths stay intuit
 - **Inline metadata** via backtick-wrapped key-value pairs — parseable by both the frontend and the agent, invisible clutter to a human skimming the file.
 - **`origin` tag** — Links every item back to where it came from: a human file, a scheduled event, a cron task, or the agent's own initiative.
 - **Sections** — `Active`, `Someday`, `Done`. The agent manages section placement. Completed items roll into `Done` and are pruned after a configurable TTL.
+- **Format decision** — V1 uses inline backtick pairs. Simple, grep-friendly, survives copy-paste.
 
 ### How the TODO Connects to Scheduling
 
@@ -191,27 +165,28 @@ sequenceDiagram
     Cron->>Agent: scheduled prompt fires
     Agent->>TODO: read "Ship feature" item status
     Agent->>Agent: Still not checked off — notify the user
-    Agent->>TODO: add note: "⚠ Due tomorrow, not yet marked complete"
+    Agent->>TODO: add note: "Due tomorrow, not yet marked complete"
 ```
 
 ## How the Watcher Interacts with the Brain
 
-When the Folder Watcher detects a change, the Event Router needs to classify it before forwarding to the agent:
+When the Folder Watcher detects a change, the Event Router classifies it before forwarding to the agent:
 
 ```mermaid
 flowchart TD
     W[Watcher detects file change] --> R{Change type?}
 
-    R -->|New file in human space| A[Tag as human-owned in manifest]
+    R -->|New file in static/| A[Index the file]
     A --> B[Queue: agent should consider generating metadata sidecar]
 
-    R -->|Modified file in human space| C[Update source_hash in sidecar if exists]
+    R -->|Modified file in static/| C[Update source_hash in sidecar if exists]
     C --> D[Queue: agent may want to refresh metadata]
 
-    R -->|Deleted file in human space| E[Mark sidecar as orphaned]
+    R -->|Deleted file in static/| E[Mark sidecar as orphaned]
     E --> F[Queue: agent should decide whether to clean up sidecar + references]
 
-    R -->|New/modified file in agent space| G[No special handling — agent knows what it did]
+    R -->|New/modified file outside static/| G[Index the file]
+    G --> G2[Queue: agent may want to process the change]
 
     R -->|Change to TODO.md| H[Parse TODO diff]
     H --> I[Queue: agent should consider scheduling actions for new/changed items]
@@ -219,6 +194,7 @@ flowchart TD
     style A fill:#e1f0ff,stroke:#4a90d9
     style C fill:#e1f0ff,stroke:#4a90d9
     style E fill:#fff3cd,stroke:#d4a017
+    style G fill:#e1f0ff,stroke:#4a90d9
     style H fill:#e1f0ff,stroke:#4a90d9
 ```
 
@@ -231,35 +207,41 @@ The agent can create **link files** — small markdown documents whose primary p
 # Daily Summary — March 6, 2026
 
 ## Meetings
-- [Standup transcript](../meetings/2026-03-06-standup.md) — Action items extracted to TODO.md
+- [Standup transcript](../static/meetings/2026-03-06-standup.md) — Action items extracted to TODO.md
 
 ## New Files
-- [vacation.jpg](../photos/vacation.jpg) — Beach sunset, auto-tagged
+- [vacation.jpg](../static/photos/vacation.jpg) — Beach sunset, auto-tagged
 
 ## Scheduled
 - 17:00 — EOD TODO review
 ```
 
-These files are agent-owned and disposable. They give the agent (and the human) a narrative view of what happened, while the underlying human files remain untouched.
+These files are disposable. They give the agent (and the human) a narrative view of what happened, while the files in `static/` remain untouched.
 
 ## Implementation Notes
 
 ### Harness enforcement
 
-The ownership check must happen **inside the tool handler**, not in the LLM prompt. Prompts can be ignored; tool-level checks cannot. The `write_file` and `delete_file` handlers should:
+The `static/` permission check must happen **inside the tool handler**, not in the LLM prompt. Prompts can be ignored; tool-level checks cannot. The `write_file`, `edit_file`, `delete_file`, and `move_file` handlers should:
 
 1. Resolve the target path.
-2. Look up ownership in the manifest (or check if the path falls under an agent-owned directory).
-3. Block the operation and return an error to the LLM if the human-owned file would be modified/deleted.
+2. Check if the resolved path falls under `brain/static/`.
+3. If yes, block the operation and return an error to the LLM.
 
-### Manifest bootstrap
+This is a single `strings.HasPrefix` (or equivalent) check. No manifest, no ownership database, no per-file metadata to maintain.
 
-On first run (or if the manifest is missing), Carson should scan the brain directory and assume everything that doesn't match an agent-owned path pattern is human-owned. The agent then builds its manifest from that scan.
+### Brain folder initialization
+
+On first run, Carson creates `.brain/`, `.meta/`, `static/`, and `daily-summary/` if they don't exist. If `.meta/` already exists, Carson assumes it was created for Carson's use. No scanning or bootstrapping is needed — the permission model is purely path-based.
 
 ### Frontend protocol
 
 The frontend reads `TODO.md` and the `.brain/` directory directly from disk. No API needed — the watch folder *is* the API. The frontend watches for changes the same way Carson does.
 
-### Open questions
+### TODO.md conflict resolution
 
-See [QUESTIONS.md](QUESTIONS.md) — brain-related questions are tracked under **Brain / Watch Folder**.
+Both the frontend and the agent can write to `TODO.md`. For V1, last write wins. The frontend's writes should take priority in practice (the user is actively interacting), but no locking or change-queuing mechanism is implemented initially. If conflicts become a real problem, we'll revisit with a more structured approach.
+
+### Decisions
+
+All brain/watch-folder questions have been resolved. See [QUESTIONS.md](QUESTIONS.md) under **Brain / Watch Folder** for the full decision log.

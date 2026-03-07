@@ -12,22 +12,32 @@ This document captures the recurring patterns and conventions used across the Ca
 
 ```
 carson/
-├── cmd/                  # CLI entry points (start, stop, status, run-scheduled)
+├── cmd/                  # CLI entry points (start, stop, status, rollback, restore, backup, chat)
 ├── internal/
 │   ├── config/           # Env-based configuration loading
 │   ├── daemon/           # Daemon lifecycle (start, stop, signal handling)
 │   ├── watcher/          # Folder watcher (FSEvents / inotify adapters)
+│   ├── brain/            # Brain folder initialization, static/ enforcement, .meta/ management
 │   ├── cron/             # Crontab read/write/namespace management
+│   ├── scheduling/       # ScheduledPrompt bundles, chain tracking, safety limits
+│   ├── versioning/       # Jujutsu wrapper, rollback logic
+│   ├── backup/           # Nightly snapshot, retention policy, backup log
 │   ├── router/           # Event routing and dispatch
 │   ├── harness/          # Agent harness — tool schema, context, LLM bridge
 │   │   ├── tools/        # Dedicated tool implementations
 │   │   └── skills/       # Skill protocol dispatch
+│   ├── chat/             # Terminal chat client (carson chat)
 │   └── platform/         # OS-specific adapters (launchd, systemd, fs events)
 ├── .env.example
 ├── .gitignore
 ├── ARCHITECTURE.md
+├── BRAIN.md
+├── FRONTEND.md
 ├── PATTERNS.md
 ├── PROJECT.md
+├── QUESTIONS.md
+├── SCHEDULING.md
+├── VERSIONING.md
 └── README.md
 ```
 
@@ -70,5 +80,15 @@ carson/
 ## Security
 
 - File operations are sandboxed: any path resolved outside the configured watch directory is rejected before I/O.
+- **`static/` enforcement:** Within the watch directory, any write/edit/delete/move targeting a path under `static/` is rejected by a path-prefix check in the tool handler. This is the only permission boundary — no ownership tracking, no manifest.
 - External API credentials are never logged, even at `debug` level.
 - The agent's tool schema is frozen at startup. Runtime tool registration is not supported.
+- System cron entries (`SYSTEM:` prefix) are protected from agent modification via `schedule_event` / `cancel_scheduled_event`.
+- The agent cannot trigger rollbacks or restores. `carson rollback` and `carson restore` are user-facing CLI commands only.
+
+## Brain File Conventions
+
+- **Sidecar metadata** lives in `.meta/`, mirroring the brain's directory structure. One `.meta.json` per source file (e.g., `.meta/static/photos/vacation.jpg.meta.json`). Sidecars include `source_hash` for detecting renames/moves.
+- **TODO.md** uses inline backtick-wrapped key-value pairs for machine-parseable metadata: `` `origin:...` `due:...` `priority:...` ``. Sections: `Active`, `Someday`, `Done (last 7 days)`.
+- **Backup log** uses JSON lines (`.jsonl`) — one JSON object per line, append-only. No wrapping array.
+- **Chat session history** uses JSON lines (`.jsonl`) with weekly compaction and 30-day purge of historical files.

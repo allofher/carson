@@ -1,7 +1,7 @@
 # Recursive Scheduled Events — Design Proposal
 
 > **Audience:** Developer picking this up for implementation.
-> **Status:** Proposal / RFC — not yet implemented.
+> **Status:** Decisions finalized — not yet implemented.
 
 ## The Problem
 
@@ -411,6 +411,10 @@ The agent also needs visibility into what's already scheduled to avoid duplicate
 - **Persistent conversation context across scheduled events.** Each scheduled prompt starts a fresh agent context. The `prompt` and `context` fields must carry everything the agent needs. This is intentional — it keeps scheduled events self-contained and debuggable.
 - **A UI for managing scheduled events.** That's the frontend repo's job. Carson just exposes the tools and the bundle files.
 
-### Open questions
+### Decisions
 
-See [QUESTIONS.md](QUESTIONS.md) — the scheduling-related questions are tracked there under **Recursive Scheduling**.
+All scheduling questions have been resolved. See [QUESTIONS.md](QUESTIONS.md) under **Recursive Scheduling** for the full decision log. Key decisions:
+
+- **Fresh chain per recurrence** — Each recurring event gets a fresh `chain`. Logically independent.
+- **No mutable pending events** — Cancel and re-create. Simpler to implement, easier to audit.
+- **Archive completed bundles** — Archive to `completed/` with TTL-based cleanup (30 days).

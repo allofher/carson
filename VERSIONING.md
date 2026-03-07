@@ -1,7 +1,7 @@
 # Versioning & Safety — Design Proposal
 
 > **Audience:** Developer picking this up for implementation.
-> **Status:** Proposal / RFC — not yet implemented.
+> **Status:** Decisions finalized — not yet implemented.
 
 ## The Problem
 
@@ -14,7 +14,7 @@ We need a versioning and backup strategy that satisfies several competing constr
 3. **It can't bloat the agent's context** — Giving the LLM a `backup` tool means it has to reason about when to call it, which wastes tokens and introduces non-deterministic gaps.
 4. **It can't silently fail** — A daemon-only backup that the user never sees will eventually break, and nobody will notice until it's too late.
 5. **It shouldn't impose a dev/staging/prod workflow** — This is a personal brain, not a deployment pipeline.
-6. **Git-on-every-change is noisy** — Constant commits create an unusable history and don't serve as real backups.
+6. **Commit-on-every-change is noisy** — Constant explicit commits create an unusable history and don't serve as real backups.
 
 No single mechanism solves all of these. The proposal is a **two-layer system**: soft versioning for intraday rollback, and hard backups for disaster recovery — with the agent involved only in the inspection step, never in the backup execution itself.
 
@@ -23,9 +23,9 @@ No single mechanism solves all of these. The proposal is a **two-layer system**:
 ```mermaid
 graph TB
     subgraph "Layer 1: Soft Versioning (intraday)"
-        SV["Git working tree<br/>in the brain folder"]
-        DIFF["Diffs accumulate<br/>throughout the day"]
-        COMMIT["Single daily commit<br/>(part of nightly job)"]
+        SV["Jujutsu working copy<br/>in the brain folder"]
+        DIFF["Changes tracked<br/>continuously"]
+        COMMIT["Nightly checkpoint commit<br/>(before backup)"]
     end
 
     subgraph "Layer 2: Hard Backup (nightly)"
@@ -57,37 +57,37 @@ graph TB
 
 | Concern | Soft versioning handles it | Hard backup handles it |
 |---|---|---|
-| "Undo the last agent edit" | Yes — `git diff` / `git checkout` | Overkill |
-| "Restore the brain from last Tuesday" | No — only has today's diffs | Yes |
-| "Disk failed, everything is gone" | No — git repo is on the same disk | Yes (if remote storage configured) |
-| "Agent made a series of bad edits over 3 hours" | Partially — diffs are available but granularity depends on watcher | Yes — nightly snapshot is clean |
-| "I want to see what changed today" | Yes — `git diff` is perfect for this | No |
+| "Undo the last agent edit" | Yes — `jj diff` / `jj restore` | Overkill |
+| "Restore the brain from last Tuesday" | No — only has recent history | Yes |
+| "Disk failed, everything is gone" | No — jj repo is on the same disk | Yes (if remote storage configured) |
+| "Agent made a series of bad edits over 3 hours" | Yes — jj tracks every change continuously | Yes — nightly snapshot is clean |
+| "I want to see what changed today" | Yes — `jj diff` is perfect for this | No |
 
 ---
 
 ## Layer 1: Soft Versioning
 
-The brain folder is a **git repository**, but not one the user or agent interacts with as a development workflow. Git is used purely as a change-tracking substrate.
+The brain folder is a **Jujutsu repository** (`jj` is an accepted dependency). Jujutsu uses git as its storage backend but provides continuous change tracking — every modification to the working copy is automatically recorded without explicit commits. This eliminates the risk of losing intraday changes to a crash.
 
 ### How it works
 
-1. **On daemon startup**, Carson initializes a git repo in the brain folder if one doesn't exist (`.git/` is added to the brain, `.brain/.gitignore` excludes temp files and caches).
-2. **Throughout the day**, the folder watcher records file changes as usual. Git sees the diffs but nothing is committed yet.
-3. **On nightly job** (see Layer 2), all accumulated changes are committed in a single automated commit before the backup snapshot runs.
-4. **On user request**, `carson rollback` can checkout a previous state or show diffs.
+1. **On daemon startup**, Carson initializes a jj repo in the brain folder if one doesn't exist. The `.jj/` directory stores all version history.
+2. **Throughout the day**, jj continuously snapshots working-copy changes. No explicit commits needed — every file modification is tracked automatically.
+3. **On nightly job** (see Layer 2), Carson creates a formal checkpoint commit before the backup snapshot runs, giving a clean restore point.
+4. **On user request**, `carson rollback` wraps jj commands to inspect history and restore files.
 
-### What git gives us
+### What Jujutsu gives us
 
-- `git diff` — See everything that changed since last commit (i.e., since last night).
-- `git log` — History of daily snapshots going back as far as the repo exists.
-- `git checkout <hash> -- path/to/file` — Restore a specific file from a previous day.
-- `git stash` — Temporarily set aside today's changes to inspect yesterday's state.
+- **Continuous change tracking** — No "uncommitted diffs lost on crash" problem. Every change is recorded as it happens.
+- `jj log` — History of all changes, including the nightly checkpoints.
+- `jj diff` — See what changed between any two points in time.
+- `jj restore --from <revision> <path>` — Restore a specific file from any previous state.
+- **Git-compatible** — jj uses git as its backend, so the data is stored in a standard `.git` directory under the hood.
 
-### What git does NOT do here
+### What jj does NOT do here
 
-- No branches. No merges. No pull requests. One linear history.
+- No branches. No merges. One linear history.
 - No pushes to a remote (that's Layer 2's job if remote backup is configured).
-- No commits triggered by the agent or by individual file changes. One commit per day, period.
 - No `.gitignore` complexity — everything in the brain is tracked except `.brain/cache/` and temp files.
 
 ### The `carson rollback` command
@@ -95,7 +95,7 @@ The brain folder is a **git repository**, but not one the user or agent interact
 A CLI tool for the user (not the agent) to interact with soft versioning:
 
 ```
-carson rollback --list              # show daily commits with stats
+carson rollback --list              # show change history with stats
 carson rollback --diff 2026-03-05   # show what changed on that day
 carson rollback --file meetings/standup.md --to 2026-03-04  # restore one file
 carson rollback --to 2026-03-04     # restore entire brain to that date (with confirmation)
@@ -115,7 +115,7 @@ A deterministic, daemon-managed backup that runs on a fixed schedule. No LLM inv
 sequenceDiagram
     participant Cron as System Crontab
     participant Script as Backup Script
-    participant Git as Git (brain repo)
+    participant JJ as Jujutsu (brain repo)
     participant FS as Brain Folder
     participant Store as Backup Storage
     participant Log as Backup Log
@@ -123,13 +123,12 @@ sequenceDiagram
     Note over Cron: Fixed schedule (e.g., 2:00 AM)
     Cron->>Script: carson backup --nightly
 
-    Note over Script,Git: Phase 1: Commit today's changes
-    Script->>Git: git add -A
-    Script->>Git: git commit -m "daily: 2026-03-06"
-    Git-->>Script: committed (or "nothing to commit")
+    Note over Script,JJ: Phase 1: Create nightly checkpoint
+    Script->>JJ: jj commit -m "nightly: 2026-03-06"
+    JJ-->>Script: checkpoint created
 
     Note over Script,FS: Phase 2: Create snapshot
-    Script->>FS: tar + compress brain folder (excluding .git)
+    Script->>FS: tar + compress brain folder (excluding .jj)
     FS-->>Script: brain-2026-03-06.tar.zst
 
     Note over Script,Store: Phase 3: Store snapshot
@@ -158,8 +157,8 @@ The backup script writes a structured log entry after every run. This is the bri
     "timestamp": "2026-03-06T02:00:14Z",
     "status": "success",
     "type": "nightly",
-    "git_commit": "a1b2c3d",
-    "git_stats": { "files_changed": 12, "insertions": 340, "deletions": 28 },
+    "jj_revision": "a1b2c3d",
+    "change_stats": { "files_changed": 12, "insertions": 340, "deletions": 28 },
     "snapshot": {
       "path": "/var/carson/backups/brain-2026-03-06.tar.zst",
       "size_bytes": 15482930,
@@ -173,7 +172,7 @@ The backup script writes a structured log entry after every run. This is the bri
     "status": "failure",
     "type": "nightly",
     "errors": ["tar: permission denied on .brain/cache/lock"],
-    "git_commit": null,
+    "jj_revision": null,
     "snapshot": null
   }
 ]
@@ -196,6 +195,8 @@ Optional remote targets (configured in `.env`):
 
 The backup script supports multiple targets. If the primary succeeds and a secondary fails, it logs the partial failure but doesn't block.
 
+V1 does not encrypt backups. V2 will encrypt remote backups by default using [age](https://github.com/FiloSottile/age) — simple, no GPG keyring complexity. Local backups remain unencrypted (disk-level encryption covers them). The user will provide or generate an age key during remote backup setup.
+
 ### Retention policy
 
 | Tier | Kept for | Granularity |
@@ -205,6 +206,14 @@ The backup script supports multiple targets. If the primary succeeds and a secon
 | Monthly | 6 months | One snapshot per month (1st of month) |
 
 Old snapshots are pruned automatically during the nightly job. The tiered policy keeps storage bounded while preserving long-term restore points.
+
+V1 backs up everything — accept large snapshots. V2 will move to rsync-style incremental backups for large brains, informed by real-world brain folder sizes.
+
+Version history size and efficiency is not a V1 concern. V2 will address history pruning and storage optimization if brain folders with large binaries cause `.jj/` growth issues.
+
+### Ad-hoc backups
+
+Users can trigger an out-of-cycle snapshot with `carson backup --now`. Ad-hoc snapshots are tagged as `manual` and are exempt from the automated retention/pruning policy — they persist until the user explicitly deletes them.
 
 ---
 
@@ -275,12 +284,12 @@ Entries prefixed with `SYSTEM:` are protected. The `schedule_event` and `cancel_
 ```mermaid
 graph LR
     subgraph "Throughout the day"
-        A["File changes accumulate"] --> B["Git tracks diffs (uncommitted)"]
+        A["File changes accumulate"] --> B["Jujutsu tracks changes continuously"]
         B --> C["User can: carson rollback --diff"]
     end
 
     subgraph "2:00 AM"
-        B --> D["Git commit: daily snapshot"]
+        B --> D["Jujutsu nightly checkpoint"]
         D --> E["Compressed backup to storage"]
         E --> F["Old backups pruned"]
         F --> G["Log written"]
@@ -307,12 +316,12 @@ graph LR
 
 | Scenario | Mechanism | Command |
 |---|---|---|
-| "Undo the agent's last change to TODO.md" | Git working tree | `carson rollback --file TODO.md` (restores from last commit) |
-| "See everything the agent changed today" | Git diff | `carson rollback --diff today` |
-| "Restore my meeting notes from last Wednesday" | Git history | `carson rollback --file meetings/standup.md --to 2026-03-04` |
+| "Undo the agent's last change to TODO.md" | Jujutsu history | `carson rollback --file TODO.md` (restores from last commit) |
+| "See everything the agent changed today" | jj diff | `carson rollback --diff today` |
+| "Restore my meeting notes from last Wednesday" | jj history | `carson rollback --file meetings/standup.md --to 2026-03-04` |
 | "Restore the entire brain from last week" | Hard backup | `carson restore --from 2026-02-28` |
 | "My disk died, I need everything back" | Remote hard backup | `carson restore --from remote --latest` |
-| "What changed between two dates?" | Git log + diff | `carson rollback --diff 2026-03-01..2026-03-05` |
+| "What changed between two dates?" | jj log + diff | `carson rollback --diff 2026-03-01..2026-03-05` |
 
 ---
 
@@ -321,11 +330,11 @@ graph LR
 ### No LLM backup tool
 Giving the agent a `backup` tool means it has to decide *when* to call it. That decision wastes tokens on every invocation ("should I backup now?"), introduces non-deterministic gaps (what if it forgets for a week?), and doesn't add value over a deterministic cron job. The agent's role is **inspection**, not execution.
 
-### No git-on-every-change
-Committing on every file change creates an unusable history (hundreds of commits per day), makes `git log` worthless for rollback, and adds I/O overhead to every watcher event. One commit per day strikes the right balance — granular enough for daily rollback, clean enough to browse.
+### No noisy commit history
+Jujutsu tracks changes continuously without creating explicit commits for every modification. The nightly checkpoint is the only deliberate commit, keeping the history clean and browsable.
 
 ### No dev/staging/prod
-The brain is not a software project. Branching, merging, and environment promotion add cognitive overhead that doesn't match the use case. The linear git history (one commit per day) is the entire "versioning workflow."
+The brain is not a software project. Branching, merging, and environment promotion add cognitive overhead that doesn't match the use case. The linear jj history (nightly checkpoints) is the entire "versioning workflow."
 
 ### No user-initiated backup button (as the primary mechanism)
 A button is fine as a supplement ("backup now before I do something risky") but not as the primary mechanism. Users forget. Users go weeks without thinking about backups. The nightly job doesn't forget.
@@ -339,8 +348,8 @@ Backups are local-first. Remote storage is optional. This keeps the system funct
 
 ### Build order
 
-1. **Git initialization** — On daemon startup, ensure the brain folder has a `.git`. Create if missing. Add `.brain/cache/` to `.gitignore`.
-2. **`carson backup --nightly` script** — Git add + commit, tar + compress, copy to backup dir, prune, write log. Must be idempotent (running twice on the same day is a no-op on the commit, creates a second snapshot but doesn't break anything).
+1. **Jujutsu initialization** — On daemon startup, ensure the brain folder has a jj repo (`.jj/`). Create with `jj git init` if missing. Configure ignore patterns for `.brain/cache/` and temp files.
+2. **`carson backup --nightly` script** — jj checkpoint commit, tar + compress, copy to backup dir, prune, write log. Must be idempotent (running twice on the same day is a no-op on the commit, creates a second snapshot but doesn't break anything).
 3. **`carson rollback` CLI** — User-facing commands for diffing, restoring files, and restoring full snapshots. Must include confirmation prompts for destructive restores.
 4. **Protected cron entries** — Add `SYSTEM:` prefix logic to the cron manager. Ensure `schedule_event` and `cancel_scheduled_event` reject operations on these entries.
 5. **Backup inspection scheduled event** — The `backup-inspect` task definition that reads the log and posts to TODO.md.
@@ -350,8 +359,8 @@ Backups are local-first. Remote storage is optional. This keeps the system funct
 
 - **Compression:** Use `zstd` for snapshots — fast, good ratio, widely available. Fall back to `gzip` if `zstd` isn't installed.
 - **Atomic writes:** The backup log must be written atomically (write to temp file, rename) to avoid corruption if the backup script is killed mid-write.
-- **Git in the brain:** The `.git` directory is excluded from hard backup snapshots — the snapshot is a clean archive of the content, not the version history. Git history lives only in the brain folder itself.
+- **Jujutsu in the brain:** The `.jj/` directory is excluded from hard backup snapshots — the snapshot is a clean archive of the content, not the version history. Jujutsu history lives only in the brain folder itself.
 
-### Open questions
+### Decisions
 
-See [QUESTIONS.md](QUESTIONS.md) — versioning-related questions are tracked under **Versioning & Safety**.
+All versioning and safety questions have been resolved. See [QUESTIONS.md](QUESTIONS.md) under **Versioning & Safety** for the full decision log.
