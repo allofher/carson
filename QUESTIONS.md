@@ -237,3 +237,105 @@ Unresolved design questions collected from across the project docs. Each entry l
 **Recommendation:** Offline-capable with queued writes. Context cards are pre-generated and cacheable. Task completions are simple state changes that can be queued and synced later. Voice drops can be stored locally and sent when connectivity returns.
 
 **Status:** Undecided
+
+---
+
+## Versioning & Safety (`VERSIONING.md`)
+
+### Q24: Should the user be able to trigger an ad-hoc backup?
+
+> The nightly job handles the primary backup. But should there be a `carson backup --now` command for the user to snapshot before doing something risky (e.g., bulk-adding files, letting the agent run a large task)? If so, does the ad-hoc snapshot follow the same retention policy or is it kept separately?
+
+**Recommendation:** Yes — `carson backup --now` creates an out-of-cycle snapshot tagged as `manual`. Manual snapshots are exempt from the automated pruning policy and kept until the user explicitly deletes them.
+
+**Status:** Undecided
+
+---
+
+### Q25: Git commit granularity — once daily or more often?
+
+> The proposal commits once per day (during the nightly job). But a single daily commit means intraday rollback relies on uncommitted diffs, which are lost if the machine crashes. Should there be periodic intraday commits (e.g., every 4 hours) to reduce the blast radius of a crash, at the cost of a noisier git log?
+
+**Recommendation:** None yet. Daily is simpler and the git log stays clean. Intraday commits add safety but create a busier history. A middle ground: commit on-demand when the watcher detects a batch of changes above a threshold (e.g., 20+ files changed), but not on every change.
+
+**Status:** Undecided
+
+---
+
+### Q26: What belongs in the backup snapshot vs. what's excluded?
+
+> The brain folder may contain large binary files (photos, videos, PDFs). Including them in every nightly compressed snapshot could make backups very large and slow. Should there be a size threshold or file-type filter? Or should binary files be handled differently (e.g., deduplicated, rsynced separately)?
+
+**Recommendation:** None yet. Options: (a) back up everything, accept large snapshots; (b) exclude files above a size threshold, log what was excluded; (c) use rsync-style incremental backups instead of full snapshots for large brains. Needs to be informed by realistic brain folder sizes.
+
+**Status:** Undecided
+
+---
+
+### Q27: Should the agent ever be able to trigger a rollback?
+
+> The proposal reserves rollback for the user (`carson rollback`). But should the agent be able to trigger a rollback of its own files if it detects it made a mistake? E.g., "I corrupted TODO.md, let me restore it from the last commit." This is self-healing but also means the agent can undo its own recent work.
+
+**Recommendation:** None yet. A limited form might be safe: the agent can restore individual *agent-owned* files from the last git commit, but cannot touch human files or do full-brain restores. This aligns with the ownership model in BRAIN.md.
+
+**Status:** Undecided
+
+---
+
+### Q28: Backup log format — append-only JSON array or JSON lines?
+
+> The proposal shows `.brain/backup-log.json` as a JSON array. But appending to a JSON array requires reading the whole file, parsing, appending, and rewriting. JSON lines (one JSON object per line, no wrapping array) is append-friendly and works with standard tools (`tail -1`, `jq -s`). Which format is better for a log that grows indefinitely?
+
+**Recommendation:** JSON lines (`.jsonl`). Append-only, no parse-rewrite cycle, trivially streamable. The agent can read the last line to get the most recent entry.
+
+**Status:** Undecided
+
+---
+
+### Q29: How long should git history be retained?
+
+> The git repo in the brain folder will accumulate daily commits indefinitely. After a year, that's 365 commits. After 5 years, 1,825. Should git history be pruned (e.g., squash commits older than 6 months into monthly snapshots)? Or is linear history cheap enough to keep forever?
+
+**Recommendation:** None yet. Git handles thousands of commits fine for small repos, but if the brain has large binary files, the `.git` directory could grow significantly. Consider `git gc --aggressive` on a schedule and evaluate whether `git filter-branch` or shallow clones are worth the complexity.
+
+**Status:** Undecided
+
+---
+
+### Q30: Should backup status be surfaced beyond TODO.md?
+
+> The proposal posts backup status to `TODO.md` for the agent and desktop app to render. Should backup failures also trigger: (a) an OS-level notification via the desktop app, (b) an email/SMS alert, (c) a persistent warning banner in the desktop app until resolved? How urgent is a single failed backup vs. multiple consecutive failures?
+
+**Recommendation:** Single failure: TODO item + desktop notification. Two consecutive failures: high-priority TODO + persistent desktop banner. Three+: all of the above. Email/SMS is out of scope for now but the notification protocol (Q22) should be extensible enough to support it later.
+
+**Status:** Undecided
+
+---
+
+### Q31: Should the soft versioning layer use git or something lighter?
+
+> Git is powerful but heavyweight for what is essentially "track file changes and allow rollback." Alternatives: (a) a simple file-copy snapshot mechanism, (b) BTRFS/ZFS snapshots (if available), (c) a purpose-built tool like restic or borg for incremental snapshots, (d) Jujutsu (jj) which has a simpler mental model than git and better handles uncommitted work. Is git the right tool here, or are we importing complexity we don't need?
+
+**Recommendation:** None yet. Git is the default because it's ubiquitous, well-understood, and the `carson rollback` CLI can wrap it cleanly. But Jujutsu is worth evaluating — its automatic snapshotting of working-copy changes would eliminate the "uncommitted diffs lost on crash" concern (Q25) without noisy commits. The key question is whether requiring users to install `jj` is an acceptable dependency.
+
+**Status:** Undecided
+
+---
+
+### Q32: What happens during a restore — does the daemon stay running?
+
+> If the user runs `carson restore --from 2026-02-28`, the brain folder's contents change underneath the running daemon and its watcher. Should the daemon: (a) be stopped before restore and restarted after, (b) stay running and the watcher picks up the changes naturally, (c) enter a "maintenance mode" that pauses agent invocations during restore?
+
+**Recommendation:** Maintenance mode. The restore command signals the daemon to pause the watcher and reject new agent invocations, performs the restore, then signals the daemon to resume. This prevents the agent from reacting to the flood of file-change events during restore.
+
+**Status:** Undecided
+
+---
+
+### Q33: Should backups be encrypted?
+
+> If backups are stored on a remote target (S3, rsync host), should they be encrypted at rest? The brain contains personal data. Options: (a) always encrypt remote backups (age, GPG, or built-in), (b) encrypt only if the user configures a key, (c) never encrypt (rely on transport/storage-level encryption).
+
+**Recommendation:** Encrypt remote backups by default using `age` (simple, no GPG keyring complexity). Local backups are unencrypted (the disk's own encryption covers them). The user provides or generates an `age` key during remote backup setup; Carson stores the public key in config and the user safeguards the private key.
+
+**Status:** Undecided
