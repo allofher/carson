@@ -73,7 +73,7 @@ func (h *Harness) Run(ctx context.Context, userMessage string) (string, error) {
 		}
 	}()
 
-	h.RunStream(ctx, userMessage, events)
+	h.RunStream(ctx, userMessage, nil, events)
 	<-done
 
 	if runErr != nil {
@@ -85,34 +85,50 @@ func (h *Harness) Run(ctx context.Context, userMessage string) (string, error) {
 // RunStream sends a user message to the LLM and streams events to the
 // provided channel. The channel is closed when the stream is complete.
 // Events: EventText, EventToolCall, EventToolResult, EventDone, EventError.
-func (h *Harness) RunStream(ctx context.Context, userMessage string, events chan<- Event) {
+//
+// If history is non-empty, the conversation continues from the existing
+// message history (multi-turn). If history is nil/empty, the first message
+// is built with topofmind + system prompt + user message.
+//
+// Returns the full message slice including the final assistant response,
+// suitable for storing back into a session.
+func (h *Harness) RunStream(ctx context.Context, userMessage string, history []llm.Message, events chan<- Event) []llm.Message {
 	defer close(events)
 
-	messages := []llm.Message{}
+	var messages []llm.Message
 
-	// Build the full prompt: topofmind + system prompt + user message.
-	var promptParts []string
-	if h.brainDir != "" {
-		if tom := brain.LoadTopOfMind(h.brainDir); tom != "" {
-			promptParts = append(promptParts, tom)
+	if len(history) > 0 {
+		// Multi-turn: start from existing history, append plain user message.
+		messages = make([]llm.Message, len(history))
+		copy(messages, history)
+		messages = append(messages, llm.Message{
+			Role:    llm.RoleUser,
+			Content: userMessage,
+		})
+	} else {
+		// First turn: build the full prompt with topofmind + system prompt + user message.
+		var promptParts []string
+		if h.brainDir != "" {
+			if tom := brain.LoadTopOfMind(h.brainDir); tom != "" {
+				promptParts = append(promptParts, tom)
+			}
 		}
+		if h.systemPrompt != "" {
+			promptParts = append(promptParts, h.systemPrompt)
+		}
+		promptParts = append(promptParts, userMessage)
+		messages = append(messages, llm.Message{
+			Role:    llm.RoleUser,
+			Content: strings.Join(promptParts, "\n\n"),
+		})
 	}
-	if h.systemPrompt != "" {
-		promptParts = append(promptParts, h.systemPrompt)
-	}
-	promptParts = append(promptParts, userMessage)
-
-	messages = append(messages, llm.Message{
-		Role:    llm.RoleUser,
-		Content: strings.Join(promptParts, "\n\n"),
-	})
 
 	tools := h.registry.Schemas()
 
 	for i := 0; i < h.maxIterations; i++ {
 		if ctx.Err() != nil {
 			events <- Event{Type: EventError, Error: ctx.Err().Error()}
-			return
+			return messages
 		}
 
 		h.logger.Debug("sending to LLM", "iteration", i+1, "messages", len(messages))
@@ -120,7 +136,7 @@ func (h *Harness) RunStream(ctx context.Context, userMessage string, events chan
 		resp, err := h.provider.Chat(ctx, messages, tools)
 		if err != nil {
 			events <- Event{Type: EventError, Error: fmt.Sprintf("LLM request failed (iteration %d): %s", i+1, err)}
-			return
+			return messages
 		}
 
 		// Emit text content.
@@ -132,10 +148,15 @@ func (h *Harness) RunStream(ctx context.Context, userMessage string, events chan
 		if len(resp.ToolCalls) == 0 {
 			h.logger.Debug("LLM finished", "stop_reason", resp.StopReason)
 			events <- Event{Type: EventDone, StopReason: string(resp.StopReason)}
-			return
+			// Append final assistant response for session history.
+			messages = append(messages, llm.Message{
+				Role:    llm.RoleAssistant,
+				Content: resp.Content,
+			})
+			return messages
 		}
 
-		// Append the assistant's response to history.
+		// Append the assistant's response (with tool calls) to history.
 		messages = append(messages, llm.Message{
 			Role:      llm.RoleAssistant,
 			Content:   resp.Content,
@@ -176,6 +197,7 @@ func (h *Harness) RunStream(ctx context.Context, userMessage string, events chan
 	}
 
 	events <- Event{Type: EventError, Error: fmt.Sprintf("agent loop exceeded %d iterations", h.maxIterations)}
+	return messages
 }
 
 func (h *Harness) executeTool(ctx context.Context, tc llm.ToolCall) (string, error) {

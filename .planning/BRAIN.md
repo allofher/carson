@@ -1,7 +1,7 @@
 # Brain — Watch Folder Design Proposal
 
 > **Audience:** Developer picking this up for implementation.
-> **Status:** Decisions finalized — not yet implemented.
+> **Status:** Core implemented — brain folder initialization, `static/` enforcement, `topofmind.md` validation. Folder watcher, sidecar metadata generation, and TODO.md management not yet implemented.
 
 ## The Idea
 
@@ -52,6 +52,7 @@ brain/                          ← the watched folder root
 ├── .meta/                      ← sidecar metadata for files
 │   ├── photos/vacation.jpg.meta.json
 │   └── meetings/standup.md.meta.json
+├── topofmind.md                ← agent-managed context (always loaded by daemon)
 ├── TODO.md                     ← unified todo file
 ├── daily-summary/              ← agent-generated summaries
 │   ├── 2026-03-05.md
@@ -78,6 +79,7 @@ brain/                          ← the watched folder root
 |---|---|---|
 | `.brain/` | Read/Write | Internal bookkeeping — indices, caches. Hidden from casual browsing. |
 | `.meta/` | Read/Write | Sidecar metadata files that annotate brain artifacts. One `.meta.json` per file, mirroring the relative path. |
+| `topofmind.md` | Read/Write | Agent-managed context file. Loaded by the daemon and combined with the system prompt on every harness invocation. Daemon-enforced constraints: max 2 KB, max 30 lines, no fenced code blocks. |
 | `TODO.md` | Read/Write | The unified task/action-item file. Acts as a lightweight database for both the agent and the frontend. |
 | `daily-summary/` | Read/Write | Periodic summaries the agent generates. |
 | `static/` | **Read-only** | User-protected files. The agent reads freely but all write/edit/delete/move operations are blocked by the harness. |
@@ -220,19 +222,29 @@ These files are disposable. They give the agent (and the human) a narrative view
 
 ## Implementation Notes
 
-### Harness enforcement
+### Harness enforcement (implemented)
 
-The `static/` permission check must happen **inside the tool handler**, not in the LLM prompt. Prompts can be ignored; tool-level checks cannot. The `write_file`, `edit_file`, `delete_file`, and `move_file` handlers should:
+The `static/` permission check happens **inside the tool handler**, not in the LLM prompt. Prompts can be ignored; tool-level checks cannot. The `write_file` handler calls `brain.ValidateWritePath()` which:
 
-1. Resolve the target path.
-2. Check if the resolved path falls under `brain/static/`.
-3. If yes, block the operation and return an error to the LLM.
+1. Resolves the target path to absolute.
+2. Checks it's inside the brain folder (`brain.IsInsideBrain`).
+3. Checks if it falls under `brain/static/` (`brain.IsStaticPath`).
+4. If either check fails, the write is blocked with a descriptive error returned to the LLM.
 
-This is a single `strings.HasPrefix` (or equivalent) check. No manifest, no ownership database, no per-file metadata to maintain.
+This uses `filepath.Abs` + `strings.HasPrefix` checks. No manifest, no ownership database, no per-file metadata to maintain.
 
-### Brain folder initialization
+### `topofmind.md` enforcement (implemented)
 
-On first run, Carson creates `.brain/`, `.meta/`, `static/`, and `daily-summary/` if they don't exist. If `.meta/` already exists, Carson assumes it was created for Carson's use. No scanning or bootstrapping is needed — the permission model is purely path-based.
+The `write_file` handler detects writes to `topofmind.md` and runs `brain.ValidateTopOfMind()` which enforces:
+- Max 2048 bytes (2 KB)
+- Max 30 lines
+- No fenced code blocks (`` ``` ``)
+
+If validation fails, the write is rejected with a clear error.
+
+### Brain folder initialization (implemented)
+
+On first run (via `carson init` or `carson start`), `brain.Init()` creates `.brain/`, `.meta/`, `static/`, `daily-summary/`, and an empty `topofmind.md` if they don't exist. If `.meta/` already exists, Carson assumes it was created for Carson's use. No scanning or bootstrapping is needed — the permission model is purely path-based.
 
 ### Frontend protocol
 

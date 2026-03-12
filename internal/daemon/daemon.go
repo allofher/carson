@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -17,6 +18,9 @@ import (
 	"github.com/allofher/carson/internal/harness/tools"
 	"github.com/allofher/carson/internal/llm"
 	"github.com/allofher/carson/internal/logging"
+	"github.com/allofher/carson/internal/scheduler"
+	"github.com/allofher/carson/internal/service"
+	"github.com/allofher/carson/internal/session"
 )
 
 // Run starts the Carson daemon. It initializes the brain folder, LLM
@@ -48,10 +52,24 @@ func Run(cfg *config.Config) error {
 		}
 		logger.Info("LLM provider ready", "provider", cfg.LLMProvider, "model", cfg.LLMModel)
 
+		// Initialize scheduler.
+		schedDir := filepath.Join(config.UserConfigDir, "scheduled")
+		bundleStore, err := scheduler.NewBundleStore(schedDir)
+		if err != nil {
+			return fmt.Errorf("initializing scheduler store: %w", err)
+		}
+
+		carsonBin, _ := os.Executable()
+		crontab := scheduler.NewCrontabManager(carsonBin)
+		sched := scheduler.New(bundleStore, crontab, logger)
+
 		registry := harness.NewRegistry()
 		registry.Register(tools.ReadFile(cfg.BrainDir))
 		registry.Register(tools.WriteFile(cfg.BrainDir))
 		registry.Register(tools.Bash(cfg.BrainDir))
+		registry.Register(tools.ScheduleEvent(sched, nil))
+		registry.Register(tools.ListScheduledEvents(sched))
+		registry.Register(tools.CancelScheduledEvent(sched))
 
 		h = harness.New(harness.Config{
 			Provider:     provider,
@@ -64,10 +82,15 @@ func Run(cfg *config.Config) error {
 		logger.Warn("no LLM provider configured — running without agent capabilities")
 	}
 
+	// Create session store for multi-turn conversations.
+	sessions := session.NewStore(session.DefaultTTL)
+	defer sessions.Close()
+
 	// Start the API server.
 	handlers := &api.Handlers{
 		Config:      cfg,
 		Harness:     h,
+		Sessions:    sessions,
 		Broadcaster: broadcaster,
 		Logger:      logger,
 		StartTime:   time.Now(),
@@ -85,6 +108,11 @@ func Run(cfg *config.Config) error {
 	defer stop()
 
 	logger.Info("carson is running", "pid", os.Getpid(), "port", cfg.DaemonPort)
+
+	if err := service.WritePID(config.UserConfigDir); err != nil {
+		logger.Warn("failed to write PID file", "error", err)
+	}
+
 	<-ctx.Done()
 	logger.Info("shutting down")
 
@@ -92,6 +120,8 @@ func Run(cfg *config.Config) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv.Shutdown(shutdownCtx)
+
+	service.RemovePID(config.UserConfigDir)
 
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/allofher/carson/internal/llm"
@@ -205,6 +206,105 @@ func TestHarness_SystemPrompt(t *testing.T) {
 	}
 }
 
+func TestHarness_MultiTurn(t *testing.T) {
+	// Track all messages sent to the provider across calls.
+	var call1Messages, call2Messages []llm.Message
+
+	callCount := 0
+	provider := &funcProvider{
+		chatFn: func(ctx context.Context, messages []llm.Message, tools []llm.Tool) (*llm.Response, error) {
+			callCount++
+			switch callCount {
+			case 1:
+				// First turn: capture messages, return a response.
+				call1Messages = make([]llm.Message, len(messages))
+				copy(call1Messages, messages)
+				return &llm.Response{Content: "Hello! How can I help?", StopReason: llm.StopEndTurn}, nil
+			case 2:
+				// Second turn: capture messages, return a response.
+				call2Messages = make([]llm.Message, len(messages))
+				copy(call2Messages, messages)
+				return &llm.Response{Content: "Sure, I can do that.", StopReason: llm.StopEndTurn}, nil
+			default:
+				return nil, fmt.Errorf("unexpected call %d", callCount)
+			}
+		},
+	}
+
+	reg := NewRegistry()
+	h := New(Config{
+		Provider:     provider,
+		Registry:     reg,
+		SystemPrompt: "You are Carson.",
+	})
+
+	// First turn: no history.
+	events1 := make(chan Event, 64)
+	history := h.RunStream(context.Background(), "Hi there", nil, events1)
+	// Drain events.
+	for range events1 {
+	}
+
+	// Verify first turn had system prompt injected.
+	if len(call1Messages) != 1 {
+		t.Fatalf("first turn: expected 1 message, got %d", len(call1Messages))
+	}
+	if !strings.Contains(call1Messages[0].Content, "You are Carson.") {
+		t.Errorf("first turn: expected system prompt in message, got %q", call1Messages[0].Content)
+	}
+	if !strings.Contains(call1Messages[0].Content, "Hi there") {
+		t.Errorf("first turn: expected user message in message, got %q", call1Messages[0].Content)
+	}
+
+	// Verify history contains the full conversation (user + assistant).
+	if len(history) != 2 {
+		t.Fatalf("expected history length 2, got %d", len(history))
+	}
+	if history[0].Role != llm.RoleUser {
+		t.Errorf("history[0].Role = %q, want user", history[0].Role)
+	}
+	if history[1].Role != llm.RoleAssistant {
+		t.Errorf("history[1].Role = %q, want assistant", history[1].Role)
+	}
+	if history[1].Content != "Hello! How can I help?" {
+		t.Errorf("history[1].Content = %q", history[1].Content)
+	}
+
+	// Second turn: pass history from first turn.
+	events2 := make(chan Event, 64)
+	history2 := h.RunStream(context.Background(), "Tell me more", history, events2)
+	for range events2 {
+	}
+
+	// Verify second turn received the full conversation history.
+	if len(call2Messages) != 3 {
+		t.Fatalf("second turn: expected 3 messages, got %d", len(call2Messages))
+	}
+	// First message should be the original (with system prompt).
+	if call2Messages[0].Role != llm.RoleUser {
+		t.Errorf("second turn msg[0].Role = %q, want user", call2Messages[0].Role)
+	}
+	if !strings.Contains(call2Messages[0].Content, "You are Carson.") {
+		t.Errorf("second turn msg[0] should contain system prompt")
+	}
+	// Second message should be the assistant's first response.
+	if call2Messages[1].Role != llm.RoleAssistant {
+		t.Errorf("second turn msg[1].Role = %q, want assistant", call2Messages[1].Role)
+	}
+	// Third message should be the new user message (plain, no system prompt).
+	if call2Messages[2].Role != llm.RoleUser {
+		t.Errorf("second turn msg[2].Role = %q, want user", call2Messages[2].Role)
+	}
+	if call2Messages[2].Content != "Tell me more" {
+		t.Errorf("second turn msg[2].Content = %q, want plain user message", call2Messages[2].Content)
+	}
+
+	// Verify final history has all 4 messages.
+	if len(history2) != 4 {
+		t.Fatalf("expected final history length 4, got %d", len(history2))
+	}
+}
+
 type capturingProvider struct {
 	inner    *mockProvider
 	captured *[]llm.Message
@@ -213,4 +313,13 @@ type capturingProvider struct {
 func (c *capturingProvider) Chat(ctx context.Context, messages []llm.Message, tools []llm.Tool) (*llm.Response, error) {
 	*c.captured = append(*c.captured, messages...)
 	return c.inner.Chat(ctx, messages, tools)
+}
+
+// funcProvider allows using a function as an llm.Provider for tests.
+type funcProvider struct {
+	chatFn func(ctx context.Context, messages []llm.Message, tools []llm.Tool) (*llm.Response, error)
+}
+
+func (f *funcProvider) Chat(ctx context.Context, messages []llm.Message, tools []llm.Tool) (*llm.Response, error) {
+	return f.chatFn(ctx, messages, tools)
 }

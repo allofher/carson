@@ -1,7 +1,7 @@
 # Chat Milestone — Design & Implementation Plan
 
 > **Audience:** Developer picking this up for implementation.
-> **Status:** Planning — not yet implemented.
+> **Status:** Implemented — daemon API, streaming harness, TUI chat client, session logging, and `carson lookout` are all built and wired up.
 
 ## Overview
 
@@ -88,7 +88,7 @@ event: text
 data: {"content": "TODO list."}
 
 event: tool_call
-data: {"tool": "read_file", "id": "tc_1", "input": {"path": "TODO.md"}}
+data: {"tool": "read_file", "id": "tc_1"}
 
 event: tool_result
 data: {"tool": "read_file", "id": "tc_1", "status": "ok"}
@@ -110,7 +110,7 @@ Event types:
 | `done` | Stream complete. Includes `stop_reason`. |
 | `error` | Something went wrong. Includes `message`. |
 
-The daemon holds separate message histories per `session_id`. Two concurrent `carson chat` instances get independent conversations — no shared state, no cross-session awareness. In practice this is almost never needed, but it's no harder to implement (a map of session ID → message history) and avoids arbitrary restrictions.
+The daemon maintains server-side message history per `session_id` via a `session.Store` (in-memory, TTL-based cleanup at 30 minutes). Each `/chat` POST with the same `session_id` continues the conversation from the existing history. The harness receives the full message history and appends the new user message, giving the LLM multi-turn context. On the first turn, `topofmind.md` and the system prompt are injected into the first message; subsequent turns in the same session use plain user messages.
 
 #### Fire-and-forget (mobile, scheduled events)
 
@@ -126,7 +126,7 @@ Submit a prompt for async processing. Returns immediately with a 202 Accepted. N
 {"prompt": "Retrieve transcript for Standup meeting", "context": {"meetingUrl": "..."}}
 
 // Response: 202 Accepted
-{"accepted": true, "invocation_id": "inv_xyz"}
+{"accepted": true}
 ```
 
 #### Operational
@@ -235,7 +235,7 @@ These constraints are **deterministic and enforced by the daemon**, not by the L
 
 ### How it's loaded
 
-The daemon reads `topofmind.md` from the brain folder and prepends it to the system prompt before every harness invocation:
+The harness reads `topofmind.md` from the brain folder and concatenates it with the system prompt and user message into a single user message:
 
 ```
 [contents of topofmind.md]
@@ -245,7 +245,7 @@ The daemon reads `topofmind.md` from the brain folder and prepends it to the sys
 [user message]
 ```
 
-If `topofmind.md` is empty or missing, nothing is prepended.
+If `topofmind.md` is empty or missing, it is omitted. If the system prompt is empty, it is also omitted. The combined text is sent as the first user message to the LLM.
 
 ## Logging & Observability
 
@@ -324,12 +324,12 @@ Each `carson chat` invocation creates a new session. Sessions are logged to disk
 └── ...
 ```
 
-Each line is a JSON object:
+Each line is a JSON object with fields: `ts`, `type`, `content`, `tool`, `status`:
 
 ```json
 {"ts": "2026-03-07T14:22:01Z", "type": "user", "content": "What's on my TODO?"}
 {"ts": "2026-03-07T14:22:03Z", "type": "assistant", "content": "Let me check..."}
-{"ts": "2026-03-07T14:22:03Z", "type": "tool_call", "tool": "read_file", "input": {"path": "TODO.md"}}
+{"ts": "2026-03-07T14:22:03Z", "type": "tool_call", "tool": "read_file"}
 {"ts": "2026-03-07T14:22:04Z", "type": "tool_result", "tool": "read_file", "status": "ok"}
 {"ts": "2026-03-07T14:22:05Z", "type": "assistant", "content": "You have 3 items..."}
 ```
@@ -342,50 +342,45 @@ Each line is a JSON object:
 
 ## Implementation Order
 
-### Step 0: Logging Infrastructure
+All steps are complete.
 
-Before building the API, set up daemon logging so we can observe what's happening.
+### Step 0: Logging Infrastructure (done)
 
-- `internal/logging/logger.go` — JSON file logger with rotation (10 MB, 3 files)
-- `internal/logging/broadcast.go` — In-memory log broadcaster for SSE subscribers
-- Update `internal/daemon/daemon.go` to write logs to both stderr and the log file
+- `internal/logging/logger.go` — JSON file logger with rotation (10 MB, 3 files), multi-handler for stderr + JSON file + broadcaster
+- `internal/logging/rotate.go` — `RotatingWriter` with configurable max size and file count
+- `internal/logging/broadcast.go` — In-memory log broadcaster for SSE subscribers, non-blocking fan-out
 - `internal/api/handlers.go` — `GET /logs` SSE endpoint
-- `cmd/carson/main.go` — add `lookout` subcommand (connects to `/logs` or tails log file)
+- `cmd/carson/main.go` — `lookout` subcommand (connects to `/logs` or tails log file)
+- `internal/lookout/lookout.go` — SSE client with colored terminal output, file tail fallback
 
-### Step 1: Daemon API Server
-
-Add an HTTP server to the daemon that starts alongside the existing signal handler.
+### Step 1: Daemon API Server (done)
 
 - `internal/api/server.go` — HTTP server, binds to `127.0.0.1:{port}`
 - `internal/api/handlers.go` — `/health`, `/status`, `/chat`, `/invoke`, `/logs` handlers
 - `internal/api/sse.go` — SSE streaming helper
-- Update `internal/daemon/daemon.go` to start the API server
-- Update config for `daemon_port`
+- `internal/daemon/daemon.go` — starts API server alongside signal handler, graceful shutdown
 
-### Step 2: Streaming Harness
+### Step 2: Streaming Harness (done)
 
-The harness currently returns a final string from `Run()`. For SSE, we need it to stream events as they happen.
+- `RunStream(ctx, message, chan Event)` streams events to a channel
+- Event types: `EventText`, `EventToolCall`, `EventToolResult`, `EventDone`, `EventError`
+- `Run()` wraps `RunStream()` for blocking use
 
-- Add `RunStream(ctx, message, chan Event)` to the harness
-- Events: `TextChunk`, `ToolCallStart`, `ToolCallResult`, `Done`, `Error`
-- The existing `Run()` can wrap `RunStream()` for non-streaming use
+### Step 3: `topofmind.md` Support (done)
 
-### Step 3: `topofmind.md` Support
+- `internal/brain/topofmind.go` — validation (2 KB, 30 lines, no code blocks), loading, path detection
+- `internal/brain/brain.go` — creates empty `topofmind.md` on init
+- `internal/harness/tools/writefile.go` — validates `topofmind.md` on write
+- `internal/harness/harness.go` — loads `topofmind.md` and combines with system prompt in user message
 
-- Update `internal/brain/` — `topofmind.md` initialization, validation (size, line count, no code blocks)
-- Update `write_file` tool handler to run `topofmind.md` validation on writes to that path
-- Update harness to load and prepend `topofmind.md` before system prompt
-
-### Step 4: Chat Client
-
-Build the TUI client that connects to the daemon API.
+### Step 4: Chat Client (done)
 
 - `internal/chat/client.go` — HTTP client, SSE reader
-- `internal/chat/tui.go` — Bubble Tea model, view, update
+- `internal/chat/tui.go` — Bubble Tea model with Glamour markdown rendering
 - `internal/chat/session.go` — JSONL session logger
-- `cmd/carson/main.go` — add `chat` subcommand
+- `cmd/carson/main.go` — `chat` subcommand
 
-### Step 5: Connection Lifecycle
+### Step 5: Connection Lifecycle (done)
 
 - `carson chat` checks daemon health on startup (`GET /health`)
 - Clear error if daemon isn't running: "Carson daemon is not running. Start it with `carson start`."

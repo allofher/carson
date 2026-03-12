@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -8,13 +9,16 @@ import (
 
 	"github.com/allofher/carson/internal/config"
 	"github.com/allofher/carson/internal/harness"
+	"github.com/allofher/carson/internal/llm"
 	"github.com/allofher/carson/internal/logging"
+	"github.com/allofher/carson/internal/session"
 )
 
 // Handlers holds the dependencies for all API route handlers.
 type Handlers struct {
 	Config      *config.Config
 	Harness     *harness.Harness
+	Sessions    *session.Store
 	Broadcaster *logging.Broadcaster
 	Logger      *slog.Logger
 	StartTime   time.Time
@@ -82,8 +86,17 @@ func (h *Handlers) Chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get session history for multi-turn.
+	var history []llm.Message
+	if h.Sessions != nil && req.SessionID != "" {
+		history = h.Sessions.Get(req.SessionID)
+	}
+
 	events := make(chan harness.Event, 64)
-	go h.Harness.RunStream(r.Context(), req.Message, events)
+	resultCh := make(chan []llm.Message, 1)
+	go func() {
+		resultCh <- h.Harness.RunStream(r.Context(), req.Message, history, events)
+	}()
 
 	for ev := range events {
 		switch ev.Type {
@@ -103,6 +116,12 @@ func (h *Handlers) Chat(w http.ResponseWriter, r *http.Request) {
 			data, _ := json.Marshal(map[string]string{"message": ev.Error})
 			sse.Send("error", string(data))
 		}
+	}
+
+	// Store updated session history.
+	if h.Sessions != nil && req.SessionID != "" {
+		finalMsgs := <-resultCh
+		h.Sessions.Set(req.SessionID, finalMsgs)
 	}
 }
 
@@ -135,9 +154,10 @@ func (h *Handlers) Invoke(w http.ResponseWriter, r *http.Request) {
 
 	h.Logger.Info("invoke request", "prompt_len", len(req.Prompt))
 
-	// Fire-and-forget: run in background.
+	// Fire-and-forget: run in background with a detached context
+	// so it isn't cancelled when the HTTP response is sent.
 	go func() {
-		_, err := h.Harness.Run(r.Context(), req.Prompt)
+		_, err := h.Harness.Run(context.Background(), req.Prompt)
 		if err != nil {
 			h.Logger.Error("invoke failed", "error", err)
 		}
