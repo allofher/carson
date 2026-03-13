@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -83,7 +84,7 @@ func Run(port int, configDir string) error {
 
 	renderer, _ := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(0),
+		glamour.WithWordWrap(80),
 	)
 
 	m := model{
@@ -108,6 +109,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Recreate the renderer with the new width so text wraps properly.
+		r, err := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(msg.Width),
+		)
+		if err == nil {
+			m.renderer = r
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -268,11 +277,11 @@ func (m model) View() string {
 	for _, msg := range m.messages {
 		switch msg.role {
 		case "user":
-			b.WriteString(userStyle.Render("you: ") + msg.content + "\n\n")
+			b.WriteString(userStyle.Render("you: ") + wordwrap.String(msg.content, m.width-6) + "\n\n")
 		case "assistant":
 			rendered, err := m.renderer.Render(msg.content)
 			if err != nil {
-				b.WriteString(msg.content + "\n\n")
+				b.WriteString(wordwrap.String(msg.content, m.width) + "\n\n")
 			} else {
 				b.WriteString(strings.TrimSpace(rendered) + "\n\n")
 			}
@@ -287,7 +296,7 @@ func (m model) View() string {
 	if m.currentText.Len() > 0 {
 		rendered, err := m.renderer.Render(m.currentText.String())
 		if err != nil {
-			b.WriteString(m.currentText.String())
+			b.WriteString(wordwrap.String(m.currentText.String(), m.width))
 		} else {
 			b.WriteString(strings.TrimSpace(rendered))
 		}

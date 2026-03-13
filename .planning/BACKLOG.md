@@ -24,3 +24,8 @@ Items identified during planning that don't belong to the current milestone but 
 ## Networking
 
 - [ ] **Tailscale/WireGuard routing** — Required for mobile app connectivity and remote access. Authentication decisions deferred until this is picked up.
+
+## Notifications
+
+- [ ] **Notification queue** — Daemon-side queue for SSE events. When a frontend reconnects, it requests missed notifications since its last seen timestamp. Required for reliable desktop notifications in remote deployments.
+- [ ] **iPhone push notifications** — iOS kills background SSE connections. Requires APNs integration or a relay service (ntfy, Pushover) as interim. Separate milestone from the desktop frontend.

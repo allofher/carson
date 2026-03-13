@@ -16,12 +16,13 @@ import (
 
 // Handlers holds the dependencies for all API route handlers.
 type Handlers struct {
-	Config      *config.Config
-	Harness     *harness.Harness
-	Sessions    *session.Store
-	Broadcaster *logging.Broadcaster
-	Logger      *slog.Logger
-	StartTime   time.Time
+	Config           *config.Config
+	Harness          *harness.Harness
+	Sessions         *session.Store
+	Broadcaster      *logging.Broadcaster
+	EventBroadcaster *logging.Broadcaster
+	Logger           *slog.Logger
+	StartTime        time.Time
 }
 
 func (h *Handlers) Health(w http.ResponseWriter, r *http.Request) {
@@ -186,6 +187,35 @@ func (h *Handlers) Logs(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			sse.Send("log", string(msg))
+		}
+	}
+}
+
+func (h *Handlers) Events(w http.ResponseWriter, r *http.Request) {
+	if h.EventBroadcaster == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "event stream not available"})
+		return
+	}
+
+	sse, err := newSSEWriter(w)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming not supported"})
+		return
+	}
+
+	sub := h.EventBroadcaster.Subscribe()
+	defer sub.Unsubscribe()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-sub.C:
+			if !ok {
+				return
+			}
+			sse.Send("file_change", string(msg))
 		}
 	}
 }

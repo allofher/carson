@@ -22,6 +22,7 @@ func NewServer(port int, handlers *Handlers) *Server {
 	mux.HandleFunc("/chat", handlers.Chat)
 	mux.HandleFunc("/invoke", handlers.Invoke)
 	mux.HandleFunc("/logs", handlers.Logs)
+	mux.HandleFunc("/events", handlers.Events)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	return &Server{

@@ -48,7 +48,7 @@
 
 The following components are designed but not yet built:
 - **Folder Watcher** — OS-level file-system events for detecting brain folder changes
-- **Cron Manager** — Namespaced crontab management for recursive scheduling
+- **Platform Scheduler** — `/etc/cron.d/carson` on Linux, LaunchAgent plists on macOS (isolated from user's crontab)
 - **Event Router** — Central dispatch for watcher, cron, and HTTP events
 - **Skills** — Higher-level composable actions via a skills protocol
 - **Versioning & Backup Layer** — Jujutsu + nightly compressed snapshots
@@ -122,6 +122,7 @@ Currently implemented:
 - `search_files` — glob and grep within the watch directory.
 - `frontend_command` — emit a native OS push notification.
 - `schedule_event` / `list_scheduled_events` / `cancel_scheduled_event` — recursive scheduling. See [SCHEDULING.md](SCHEDULING.md).
+- `check_schedule_drift` — compares platform scheduler state against bundle directory, reports mismatches without mutating.
 
 ### 7. Skills (planned)
 

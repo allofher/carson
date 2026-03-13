@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 //go:embed config.default.json
@@ -74,6 +75,14 @@ type Config struct {
 	// SystemPromptPath is the absolute path to the system prompt markdown file.
 	// Defaults to ~/.config/carson/system-prompt.md.
 	SystemPromptPath string
+
+	// WatcherDebounce is the per-path debounce delay for the file watcher.
+	// Defaults to 500ms.
+	WatcherDebounce time.Duration
+
+	// WatcherBatchWindow is the batch accumulation window for the file watcher.
+	// Defaults to 5 minutes.
+	WatcherBatchWindow time.Duration
 }
 
 // userConfig is the on-disk representation of ~/.config/carson/config.json.
@@ -124,6 +133,10 @@ func Load(envDir string) (*Config, error) {
 	if cfg.LLMProvider != "" {
 		cfg.LLMAPIKey = resolveAPIKey(cfg.LLMProvider)
 	}
+
+	// Resolve watcher config.
+	cfg.WatcherDebounce = parseDurationEnv("CARSON_WATCHER_DEBOUNCE", 500*time.Millisecond)
+	cfg.WatcherBatchWindow = parseDurationEnv("CARSON_WATCHER_BATCH_WINDOW", 5*time.Minute)
 
 	// Resolve system prompt path.
 	cfg.SystemPromptPath = firstNonEmpty(
@@ -208,6 +221,18 @@ func parseIntEnv(key string) int {
 	}
 	n, _ := strconv.Atoi(v)
 	return n
+}
+
+func parseDurationEnv(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fallback
+	}
+	return d
 }
 
 func firstNonZeroInt(vals ...int) int {

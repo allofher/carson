@@ -184,26 +184,73 @@ When the agent calls `schedule_event`, Carson compiles a JSON file to disk. This
 | `parent_event_id` | Links to the event that spawned this one. Enables chain tracing. |
 | `chain` | Ordered list of all event IDs in this recursive chain. Enables depth limiting. |
 
-## How Cron Entries Work
+## Crontab Isolation
 
-Carson manages a namespaced block in the user's crontab:
+**Decision (2026-03-11):** Carson uses a **platform-separated crontab** that is fully isolated from the user's personal crontab. The daemon runs as the human user (required for brain folder access), but scheduling lives in its own space.
+
+### Platform Strategy
+
+| Platform | Mechanism | Why |
+|---|---|---|
+| **Linux** | `/etc/cron.d/carson` — a drop-in cron file | Completely separate from user's `crontab -l`. Standard cron.d convention. Requires root to write; `carson init` sets this up (or a small setuid helper). |
+| **macOS** | `~/Library/LaunchAgents/com.carson.evt_*.plist` per event | Each scheduled event is a launchd agent. Completely separate from any crontab. Carson already has launchd abstraction in `manager_darwin.go`. |
+
+This eliminates the shared-crontab problem: the user can freely edit their own crontab without causing drift with Carson's scheduled events, and vice versa.
+
+### Why Not a Dedicated System User
+
+A `carson` system user was considered for crontab isolation. Rejected because the daemon must run as the human user to have natural read/write access to the brain folder. The brain folder's value depends on zero-friction access — the user drops files in from any terminal, Finder, etc. Requiring group permissions or ACLs for that access defeats the purpose.
+
+### Example: Linux `/etc/cron.d/carson`
 
 ```crontab
-# >>> CARSON MANAGED — DO NOT EDIT <<<
+# Carson managed — this file is fully owned by the carson daemon.
+# Do not edit manually; use `carson schedule list` to inspect.
+SHELL=/bin/bash
+
 # [evt_abc123] Retrieve transcript for Standup meeting
-35 10 6 3 * /usr/local/bin/carson run-scheduled --event evt_abc123
+35 10 6 3 * liz /usr/local/bin/carson run-scheduled --event evt_abc123
 # [poll-calendar] Regular calendar poll
-*/30 9-17 * * 1-5 /usr/local/bin/carson run-scheduled --task poll-calendar
-# <<< CARSON MANAGED >>>
+*/30 9-17 * * 1-5 liz /usr/local/bin/carson run-scheduled --task poll-calendar
+```
+
+Note: `/etc/cron.d/` entries require specifying the user field (6th field before the command).
+
+### Example: macOS LaunchAgent
+
+Each event becomes a plist at `~/Library/LaunchAgents/com.carson.evt_abc123.plist` with a `StartCalendarInterval` key. Carson's existing launchd abstraction handles creation and removal.
+
+### Source of Truth
+
+**The crontab/launchd entry is authoritative for "should this fire?"** The bundle file is authoritative for "what should it do?" and "what happened last time?"
+
+| Question | Authority |
+|---|---|
+| Is this event scheduled to fire? | Crontab (Linux) / LaunchAgent (macOS) |
+| What prompt/context does it carry? | Bundle file |
+| What's its execution history? | Bundle file |
+
+Reconciliation rule: **cron wins on scheduling.** If the cron entry is gone, the bundle is effectively cancelled regardless of its status field. If a bundle is gone but a cron entry exists, the cron entry is removed (nothing to execute).
+
+### Drift Report Tool
+
+Carson provides a `schedule drift` subcommand (and an agent tool `check_schedule_drift`) that compares the crontab/launchd state against the bundle directory and reports mismatches without mutating either side. This makes the system self-healing: the agent or the user can inspect drift and decide what to do.
+
+```
+$ carson schedule drift
+OK   evt_abc123  fires_at=2026-03-06T10:35  cron=present  bundle=pending
+DRIFT evt_def456  fires_at=2026-03-06T14:00  cron=missing  bundle=pending
+DRIFT evt_ghi789  fires_at=2026-03-06T09:00  cron=present  bundle=missing
 ```
 
 The `run-scheduled` subcommand:
-1. Loads the bundle from disk.
-2. Checks `expire_after` — drops silently if stale.
-3. Sends the prompt + context into the Event Router.
-4. On success: marks the bundle `completed` (or re-registers if `recurrence` is set).
-5. On failure: increments `retry_count`, re-schedules with backoff if under `max_retries`.
-6. Cleans up the crontab entry for completed one-shot events.
+1. Loads the bundle from disk. If missing, logs a warning, removes the cron entry, exits.
+2. Checks `expire_after` — drops silently if stale, cleans up cron entry.
+3. Checks bundle status — if already `completed`, exits early, cleans up cron entry (idempotent).
+4. Sends the prompt + context into the Event Router.
+5. On success: marks the bundle `completed` (or re-registers if `recurrence` is set).
+6. On failure: increments `retry_count`, re-schedules with backoff if under `max_retries`.
+7. Cleans up the cron entry for completed one-shot events.
 
 ## Recursion & Safety
 
@@ -271,23 +318,30 @@ graph LR
         C["~/.carson/config<br/>Safety limits"]
     end
 
-    subgraph Crontab
-        D["User crontab<br/>CARSON MANAGED block"]
+    subgraph Platform Scheduler
+        D_linux["/etc/cron.d/carson<br/>(Linux)"]
+        D_mac["~/Library/LaunchAgents/<br/>com.carson.evt_*.plist<br/>(macOS)"]
     end
 
     subgraph Runtime
         E["Event Router"]
         F["Agent Harness"]
         G["schedule_event tool"]
+        H["Drift Report"]
     end
 
     G -->|writes| A
-    G -->|writes| D
-    D -->|triggers| E
+    G -->|writes| D_linux
+    G -->|writes| D_mac
+    D_linux -->|triggers| E
+    D_mac -->|triggers| E
     E -->|loads| A
     E -->|forwards| F
     F -->|may call| G
     A -->|on completion| B
+    H -->|reads| A
+    H -->|reads| D_linux
+    H -->|reads| D_mac
 ```
 
 ## Example: Full Meeting Transcript Chain
@@ -401,13 +455,15 @@ The agent also needs visibility into what's already scheduled to avoid duplicate
 
 ### Platform considerations
 
-- **Crontab access:** Both macOS and Linux support `crontab -l` / `crontab -` for reading and writing. Carson should use these commands rather than editing crontab files directly.
+- **Linux:** Carson writes to `/etc/cron.d/carson`. Requires root access; `carson init` configures this during setup. Entries include the username field (required for cron.d).
+- **macOS:** Carson writes LaunchAgent plists to `~/Library/LaunchAgents/`. Uses the existing launchd platform abstraction in `manager_darwin.go`. Each event is a separate plist with `StartCalendarInterval`.
 - **File locking:** The bundles directory needs a lock file to prevent races between the daemon writing new bundles and `run-scheduled` reading/updating them.
-- **Timezone handling:** All `fires_at` times must be stored with timezone offset. Crontab entries use system-local time. Carson must convert correctly.
+- **Timezone handling:** All `fires_at` times must be stored with timezone offset. Cron entries use system-local time. Carson must convert correctly. launchd uses local time by default.
 
 ### What NOT to build
 
-- **A custom scheduler daemon.** Use cron. It's battle-tested, survives reboots, and the user can inspect it with standard tools.
+- **A dedicated `carson` system user.** The daemon must run as the human user for brain folder access. Crontab isolation is achieved through platform-separated scheduling (cron.d / launchd), not user separation.
+- **A custom scheduler daemon.** Use platform-native scheduling (cron on Linux, launchd on macOS). Battle-tested, survives reboots, inspectable with standard tools.
 - **Persistent conversation context across scheduled events.** Each scheduled prompt starts a fresh agent context. The `prompt` and `context` fields must carry everything the agent needs. This is intentional — it keeps scheduled events self-contained and debuggable.
 - **A UI for managing scheduled events.** That's the frontend repo's job. Carson just exposes the tools and the bundle files.
 
@@ -418,3 +474,59 @@ All scheduling questions have been resolved. See [QUESTIONS.md](QUESTIONS.md) un
 - **Fresh chain per recurrence** — Each recurring event gets a fresh `chain`. Logically independent.
 - **No mutable pending events** — Cancel and re-create. Simpler to implement, easier to audit.
 - **Archive completed bundles** — Archive to `completed/` with TTL-based cleanup (30 days).
+- **Platform-separated crontab (2026-03-11)** — Carson's scheduled events live in `/etc/cron.d/carson` (Linux) or `~/Library/LaunchAgents/` (macOS), fully isolated from the user's personal crontab. Daemon runs as the human user for brain folder access.
+- **Cron is authoritative for scheduling (2026-03-11)** — The cron/launchd entry determines whether an event fires. The bundle file determines what it does and tracks execution history. Drift report tool enables self-healing without automatic reconciliation.
+
+## Remote Deployment & Multi-Surface Architecture
+
+**Decision (2026-03-11):** Carson is designed for a single-daemon, multi-surface deployment where the daemon runs on one host and frontends connect remotely.
+
+### Deployment Topology
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Linux Host (home / work VM)                        │
+│                                                     │
+│  ┌─────────────┐  ┌──────────────┐  ┌───────────┐  │
+│  │ Carson       │  │ Platform     │  │ Brain     │  │
+│  │ Daemon       │──│ Scheduler    │  │ Folder    │  │
+│  │ :7780        │  │ (cron.d)     │  │           │  │
+│  └──────┬──────┘  └──────────────┘  └───────────┘  │
+│         │                                           │
+└─────────┼───────────────────────────────────────────┘
+          │  Tailscale / WireGuard / VPN
+    ┌─────┼──────────────────┐
+    │     │                  │
+    ▼     ▼                  ▼
+┌────────┐ ┌───────────┐ ┌──────────┐
+│ macOS  │ │ macOS TUI │ │ iPhone   │
+│Desktop │ │ (carson   │ │ App      │
+│Frontend│ │  chat)    │ │          │
+└────────┘ └───────────┘ └──────────┘
+```
+
+### How Notifications Work Remotely
+
+When a scheduled event fires on the Linux host, the daemon pushes an SSE event to all connected frontends. Each frontend resolves the notification locally:
+- **macOS desktop app:** Calls `NSUserNotificationCenter` / `UNUserNotificationCenter` for native desktop notifications.
+- **macOS TUI:** Displays inline in the terminal.
+- **iPhone app:** Requires push notification integration (APNs or relay service like ntfy/Pushover) since iOS kills background SSE connections. This is a separate milestone.
+
+### Brain Folder in Remote Deployments
+
+The brain folder lives on the daemon host. Remote access options:
+- **File sync (Tailscale Drive, Syncthing, Dropbox):** User edits files on their laptop; sync propagates to daemon host. The daemon sees changes via the folder watcher. **Sync latency is acceptable** — real-time interaction comes through `carson chat`, not file syncing.
+- **API-mediated writes:** Frontends write to the brain folder through the daemon's HTTP API. No sync service needed, but requires the frontend to be connected.
+
+### File Conflict Strategy
+
+Both the daemon and the user write to the brain folder. With file sync, conflicts are possible. The existing `static/` subdirectory handles the critical case: anything the user doesn't want the agent to modify goes in `static/` (read-only for the agent). For everything else, the agent and user share write access. If a sync conflict file appears, the daemon's folder watcher can detect it and the agent can resolve it — making the system self-healing.
+
+### Known Gaps (Accepted)
+
+| Gap | Impact | Mitigation |
+|---|---|---|
+| File sync latency (seconds to minutes) | Brain folder changes aren't instant across devices | Real-time interaction uses `carson chat` over SSE, not file sync |
+| iPhone push notifications | iOS kills background SSE; notifications require APNs/relay | Separate milestone; ntfy or Pushover as interim solution |
+| Single point of failure (daemon host) | If the host is down, nothing works | Acceptable for personal use; work deployment behind VPN has standard infra monitoring |
+| Notification queue for offline frontends | Missed notifications when frontend disconnects | Daemon queues notifications; frontend requests missed events on reconnect |

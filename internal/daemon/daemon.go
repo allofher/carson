@@ -18,9 +18,11 @@ import (
 	"github.com/allofher/carson/internal/harness/tools"
 	"github.com/allofher/carson/internal/llm"
 	"github.com/allofher/carson/internal/logging"
+	"github.com/allofher/carson/internal/router"
 	"github.com/allofher/carson/internal/scheduler"
 	"github.com/allofher/carson/internal/service"
 	"github.com/allofher/carson/internal/session"
+	"github.com/allofher/carson/internal/watcher"
 )
 
 // Run starts the Carson daemon. It initializes the brain folder, LLM
@@ -86,14 +88,46 @@ func Run(cfg *config.Config) error {
 	sessions := session.NewStore(session.DefaultTTL)
 	defer sessions.Close()
 
+	// Set up the file watcher and event broadcaster.
+	eventBroadcaster := logging.NewBroadcaster()
+
+	// Create a context for background goroutines (watcher, router).
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+
+	fw, err := watcher.New(watcher.Config{
+		BrainDir:      cfg.BrainDir,
+		DebounceDelay: cfg.WatcherDebounce,
+		BatchWindow:   cfg.WatcherBatchWindow,
+		Broadcaster:   eventBroadcaster,
+		Logger:        logger,
+	})
+	if err != nil {
+		logger.Warn("failed to start file watcher", "error", err)
+	}
+
+	var batches <-chan []watcher.FileEvent
+	if fw != nil {
+		batches = fw.Run(bgCtx)
+		logger.Info("file watcher started", "brain_dir", cfg.BrainDir)
+	}
+
+	// Start the event router if both watcher and harness are available.
+	if batches != nil && h != nil {
+		rt := router.New(h, logger)
+		go rt.ConsumeLoop(bgCtx, batches)
+		logger.Info("event router started")
+	}
+
 	// Start the API server.
 	handlers := &api.Handlers{
-		Config:      cfg,
-		Harness:     h,
-		Sessions:    sessions,
-		Broadcaster: broadcaster,
-		Logger:      logger,
-		StartTime:   time.Now(),
+		Config:           cfg,
+		Harness:          h,
+		Sessions:         sessions,
+		Broadcaster:      broadcaster,
+		EventBroadcaster: eventBroadcaster,
+		Logger:           logger,
+		StartTime:        time.Now(),
 	}
 	srv := api.NewServer(cfg.DaemonPort, handlers)
 
